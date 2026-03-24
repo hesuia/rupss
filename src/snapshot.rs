@@ -24,6 +24,18 @@ pub enum SortKey {
     Cpu,
 }
 
+impl SortKey {
+    /// Returns the default sort direction for this key.
+    pub fn default_direction(&self) -> SortDirection {
+        match self {
+            SortKey::Pid | SortKey::Ppid | SortKey::Owner | SortKey::Name | SortKey::Command => {
+                SortDirection::Ascending
+            }
+            _ => SortDirection::Descending,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
 pub enum SortDirection {
     /// Sort in ascending order (e.g. lowest to highest).
@@ -56,6 +68,7 @@ impl SortState {
         };
     }
 
+    /// Returns a human-readable label for the current sort state, combining the key and direction.
     pub fn label(&self) -> CompactString {
         let k = self.key.as_ref();
         let d = self.direction.as_ref();
