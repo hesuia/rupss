@@ -7,3 +7,4 @@ edition = "2024"
 crossterm = "0.29.0"
 procfs = "0.18.0"
 ratatui = "0.30.0"
+strum = { version = "0.28.0", features = ["derive"] }
