@@ -24,6 +24,13 @@ const TICK_RATE: Duration = Duration::from_secs(1);
 const EVENT_POLL: Duration = Duration::from_millis(250);
 type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 
+/// Result of handling one key input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAction {
+    Continue,
+    Quit,
+}
+
 /// Mutable application state shared by the collector and the renderer.
 ///
 /// Responsibilities:
@@ -76,10 +83,9 @@ fn run_app(terminal: &mut CrosstermTerminal) -> io::Result<()> {
         if event::poll(EVENT_POLL)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
-                    if app.handle_key(key.code) {
+                    if key.kind == KeyEventKind::Press
+                        && matches!(app.handle_key(key.code), KeyAction::Quit)
+                    {
                         return Ok(());
                     }
                 }
@@ -211,62 +217,63 @@ impl AppState {
 
     /// Applies one keyboard action.
     ///
-    /// Returns `true` when the caller should terminate the application.
+    /// Returns a [`KeyAction`] that tells the caller whether to continue
+    /// running or terminate the application.
     /// The mapping is intentionally small and focused on fast navigation.
-    pub fn handle_key(&mut self, code: KeyCode) -> bool {
+    pub fn handle_key(&mut self, code: KeyCode) -> KeyAction {
         match code {
-            KeyCode::Char('q') => true,
+            KeyCode::Char('q') => KeyAction::Quit,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_selection(-1);
-                false
+                KeyAction::Continue
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_selection(1);
-                false
+                KeyAction::Continue
             }
             KeyCode::PageUp => {
                 let page = self.viewport_rows.max(1) as isize;
                 self.move_selection(-page);
-                false
+                KeyAction::Continue
             }
             KeyCode::PageDown => {
                 let page = self.viewport_rows.max(1) as isize;
                 self.move_selection(page);
-                false
+                KeyAction::Continue
             }
             KeyCode::Home => {
                 self.selected = 0;
                 self.ensure_visible();
                 self.populate_visible_details();
-                false
+                KeyAction::Continue
             }
             KeyCode::End => {
                 self.selected = self.snapshot.processes.len().saturating_sub(1);
                 self.ensure_visible();
                 self.populate_visible_details();
-                false
+                KeyAction::Continue
             }
             KeyCode::Char('r') => {
                 self.sort_key = SortKey::Rss;
                 self.resort();
-                false
+                KeyAction::Continue
             }
             KeyCode::Char('s') => {
                 self.sort_key = SortKey::Swap;
                 self.resort();
-                false
+                KeyAction::Continue
             }
             KeyCode::Char('p') => {
                 self.sort_key = SortKey::Pss;
                 self.resort();
-                false
+                KeyAction::Continue
             }
             KeyCode::Char('c') => {
                 self.sort_key = SortKey::Cpu;
                 self.resort();
-                false
+                KeyAction::Continue
             }
-            _ => false,
+            _ => KeyAction::Continue,
         }
     }
 
@@ -530,7 +537,7 @@ fn restore_terminal(terminal: &mut CrosstermTerminal) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, compare_process_rows, history_points};
+    use super::{AppState, KeyAction, compare_process_rows, history_points};
     use crate::collector::ProcfsCollector;
     use crate::history::HistoryBuffer;
     use crate::snapshot::{ProcessRow, SortKey};
@@ -576,17 +583,23 @@ mod tests {
         app.set_viewport_rows(3);
         app.selected = 1;
 
-        assert!(!app.handle_key(KeyCode::Char('j')));
+        assert_eq!(app.handle_key(KeyCode::Char('j')), KeyAction::Continue);
         assert_eq!(app.selected, 2);
 
-        assert!(!app.handle_key(KeyCode::Char('j')));
+        assert_eq!(app.handle_key(KeyCode::Char('j')), KeyAction::Continue);
         assert_eq!(app.selected, 2);
 
-        assert!(!app.handle_key(KeyCode::Char('k')));
+        assert_eq!(app.handle_key(KeyCode::Char('k')), KeyAction::Continue);
         assert_eq!(app.selected, 1);
 
-        assert!(!app.handle_key(KeyCode::Char('k')));
+        assert_eq!(app.handle_key(KeyCode::Char('k')), KeyAction::Continue);
         assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn q_requests_quit() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        assert_eq!(app.handle_key(KeyCode::Char('q')), KeyAction::Quit);
     }
 
     #[test]
@@ -639,7 +652,12 @@ mod tests {
     #[test]
     fn wheel_scroll_up_changes_offset_not_selected() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.snapshot.processes = vec![
+            sample_row(10),
+            sample_row(20),
+            sample_row(30),
+            sample_row(40),
+        ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
         app.selected = 3;
@@ -659,7 +677,12 @@ mod tests {
     #[test]
     fn wheel_scroll_down_changes_offset_not_selected() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.snapshot.processes = vec![
+            sample_row(10),
+            sample_row(20),
+            sample_row(30),
+            sample_row(40),
+        ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
         app.selected = 0;
@@ -679,7 +702,12 @@ mod tests {
     #[test]
     fn wheel_scroll_clamps_at_bounds() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.snapshot.processes = vec![
+            sample_row(10),
+            sample_row(20),
+            sample_row(30),
+            sample_row(40),
+        ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
         app.scroll_offset = 0;
@@ -705,7 +733,12 @@ mod tests {
     #[test]
     fn wheel_outside_table_does_not_change_state() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.snapshot.processes = vec![
+            sample_row(10),
+            sample_row(20),
+            sample_row(30),
+            sample_row(40),
+        ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
         app.selected = 2;
@@ -725,7 +758,12 @@ mod tests {
     #[test]
     fn wheel_on_table_border_is_handled() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.snapshot.processes = vec![
+            sample_row(10),
+            sample_row(20),
+            sample_row(30),
+            sample_row(40),
+        ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(5, 2, 40, 8));
         app.scroll_offset = 0;
