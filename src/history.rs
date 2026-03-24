@@ -5,6 +5,7 @@ use std::collections::{VecDeque, vec_deque};
 /// This type behaves like a sliding window:
 /// - When the buffer reaches `capacity`, pushing a new item drops the oldest item.
 /// - Iteration yields items from oldest to newest.
+///
 /// This keeps memory usage stable while preserving the latest samples for charts.
 #[derive(Debug, Clone)]
 pub struct HistoryBuffer<T> {
