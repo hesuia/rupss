@@ -234,29 +234,18 @@ fn option_cell(value: Option<u64>) -> Cell<'static> {
 fn format_tree_name(entry: &crate::app::TreeRow, name: &str) -> String {
     let mut prefix = String::new();
     for has_next in entry.ancestor_has_next_sibling.iter() {
-        // if has_next {
-        //     prefix.push_str("│  ");
-        // } else {
-        //     prefix.push_str("   ");
-        // }
         prefix.push_str(if *has_next { "│  " } else { "   " });
     }
 
     if entry.depth > 0 {
-        // if entry.is_last_sibling {
-        //     prefix.push_str("└─");
-        // } else {
-        //     prefix.push_str("├─");
-        // }
-        prefix.push_str(if entry.is_last_sibling { "└─" } else { "├─" });
+        prefix.push_str(if entry.is_last_sibling {
+            "└─"
+        } else {
+            "├─"
+        });
     }
 
     if entry.has_children {
-        // if entry.expanded {
-        //     prefix.push_str("[-] ");
-        // } else {
-        //     prefix.push_str("[+] ");
-        // }
         prefix.push_str(if entry.expanded { "[-] " } else { "[+] " });
     } else if entry.depth > 0 {
         prefix.push(' ');
