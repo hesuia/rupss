@@ -10,29 +10,66 @@ const MAX_NAME_LEN: usize = 32;
 const MAX_COMMAND_LEN: usize = 96;
 const KIB: u64 = 1024;
 
+/// Previous CPU counters for one process.
+///
+/// CPU usage is calculated from the difference between two samples, so the app
+/// stores the last observed tick count and timestamp per PID. This struct is
+/// intentionally small to keep the cache lightweight.
 #[derive(Debug, Clone, Copy)]
 pub struct CpuSample {
+    /// Sum of user and system ticks from `/proc/<pid>/stat`.
     pub total_time_ticks: u64,
+    /// Time when the tick count was captured.
     pub captured_at: Instant,
 }
 
+/// Memory details resolved lazily from `smaps_rollup`.
+///
+/// These values are not available from cheap sources like `/proc/<pid>/status`,
+/// so they are collected only for visible rows to keep the tool lightweight.
 #[derive(Debug, Clone)]
 pub struct DetailedMemorySample {
+    /// Unique set size in bytes.
     pub uss_bytes: Option<u64>,
+    /// Proportional set size in bytes.
     pub pss_bytes: Option<u64>,
+    /// Swap usage reported by `smaps_rollup`, in bytes.
     pub swap_bytes: Option<u64>,
 }
 
+/// Abstracts process and memory collection behind a swappable interface.
+///
+/// The current implementation uses `procfs`, but the rest of the application
+/// only depends on this trait so a custom parser can replace it later.
+/// This is the key seam that keeps parsing logic isolated from UI and state.
 pub trait SystemCollector {
+    /// Collects the lightweight full-process snapshot used for every refresh.
+    ///
+    /// Expected work:
+    /// - Scan all processes and gather cheap fields (RSS, swap, owner, threads, command).
+    /// - Seed CPU usage by capturing the current tick count per PID.
+    /// - Aggregate totals used by the top charts and the summary panel.
+    ///
+    /// Returns:
+    /// - The new `Snapshot`.
+    /// - An updated CPU cache keyed by PID.
+    /// - A `HistoryPoint` to append to the graph buffers.
     fn collect_base_snapshot(
         &self,
         previous_cpu: &HashMap<i32, CpuSample>,
         now: Instant,
     ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), procfs::ProcError>;
 
+    /// Collects heavier memory details only for the currently visible PIDs.
+    ///
+    /// Implementations should keep this path narrow because it may read
+    /// expensive sources such as `smaps_rollup`. The caller decides visibility.
     fn collect_visible_memory_details(&self, pids: &[i32]) -> HashMap<i32, DetailedMemorySample>;
 }
 
+/// `procfs`-backed collector implementation for Linux.
+///
+/// Uses `/proc` as the source of truth and performs no caching beyond CPU samples.
 #[derive(Debug, Clone, Copy)]
 pub struct ProcfsCollector {
     page_size: u64,
@@ -40,6 +77,9 @@ pub struct ProcfsCollector {
 }
 
 impl ProcfsCollector {
+    /// Creates a collector using the current machine's page size and tick rate.
+    ///
+    /// These are used to convert `stat.rss` pages and `stat` ticks into bytes/percentages.
     pub fn new() -> Self {
         Self {
             page_size: page_size(),
@@ -47,12 +87,18 @@ impl ProcfsCollector {
         }
     }
 
+    /// Collects a single process row and CPU seed from a live `Process` handle.
+    ///
+    /// This function intentionally avoids retaining the `Process` object to prevent
+    /// holding many open `/proc/<pid>` file descriptors.
     fn collect_one_process(
         &self,
         process: Process,
         previous_cpu: &HashMap<i32, CpuSample>,
         now: Instant,
     ) -> Option<(ProcessRow, CpuSample)> {
+        // Drop the `Process` object quickly after copying the fields we need so we do not
+        // keep many `/proc/<pid>` directory file descriptors open.
         let pid = process.pid;
         let stat = process.stat().ok()?;
         let status = process.status().ok()?;
@@ -169,6 +215,7 @@ impl SystemCollector for ProcfsCollector {
         let mut details = HashMap::with_capacity(pids.len());
 
         for pid in pids {
+            // Detailed memory metrics are intentionally loaded only for the visible rows.
             let Ok(process) = Process::new(*pid) else {
                 continue;
             };
@@ -201,6 +248,9 @@ impl SystemCollector for ProcfsCollector {
     }
 }
 
+    /// Converts a change in process CPU ticks into a human-readable percentage.
+    ///
+    /// The result is a per-process percentage, not normalized by CPU count.
 fn calculate_cpu_percent(
     previous: &CpuSample,
     total_time_ticks: u64,

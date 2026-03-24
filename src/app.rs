@@ -20,10 +20,23 @@ const TICK_RATE: Duration = Duration::from_secs(1);
 const EVENT_POLL: Duration = Duration::from_millis(250);
 type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 
+/// Mutable application state shared by the collector and the renderer.
+///
+/// Responsibilities:
+/// - Owns the latest `Snapshot` produced by the collector.
+/// - Keeps UI state (selection, scroll offset, active sort key).
+/// - Maintains fixed-size history buffers for the top graphs.
+/// - Holds a PID -> CPU sample cache so per-process CPU usage can be derived
+///   from two consecutive samples.
+/// - Tracks the last collection error for display instead of crashing the UI.
 pub struct AppState {
+    /// Latest collected snapshot shown in the UI.
     pub snapshot: Snapshot,
+    /// Active sort key for the process table.
     pub sort_key: SortKey,
+    /// Absolute index of the selected row in `snapshot.processes`.
     pub selected: usize,
+    /// Absolute start index of the visible table window.
     pub scroll_offset: usize,
     viewport_rows: usize,
     username_cache: HashMap<u32, String>,
@@ -31,9 +44,14 @@ pub struct AppState {
     swap_history: HistoryBuffer<u64>,
     previous_cpu: HashMap<i32, CpuSample>,
     collector: ProcfsCollector,
+    /// Most recent collection error kept for on-screen display.
     pub last_error: Option<String>,
 }
 
+/// Runs the TUI application until the user quits.
+///
+/// This sets up the terminal, runs the event loop, and ensures the terminal is
+/// restored even when the loop exits due to user input.
 pub fn run() -> io::Result<()> {
     let mut terminal = setup_terminal()?;
     let result = run_app(&mut terminal);
@@ -70,6 +88,10 @@ fn run_app(terminal: &mut CrosstermTerminal) -> io::Result<()> {
 }
 
 impl AppState {
+    /// Creates an empty application state with preallocated history buffers.
+    ///
+    /// The actual process list and system summary are populated by the first
+    /// `refresh()` call.
     pub fn new(collector: ProcfsCollector) -> Self {
         Self {
             snapshot: Snapshot {
@@ -101,6 +123,13 @@ impl AppState {
         }
     }
 
+    /// Refreshes the full snapshot and then loads detailed memory data for visible rows.
+    ///
+    /// The refresh flow:
+    /// 1. Collect a cheap full-process snapshot and aggregate totals.
+    /// 2. Sort the list and keep the previously selected PID if still present.
+    /// 3. Update the history buffers for the top graphs.
+    /// 4. Load `smaps_rollup` details only for the rows currently visible.
     pub fn refresh(&mut self) -> io::Result<()> {
         let selected_pid = self.selected_pid();
         let now = Instant::now();
@@ -125,11 +154,13 @@ impl AppState {
         }
     }
 
+    /// Updates the number of table rows that fit on screen.
     pub fn set_viewport_rows(&mut self, rows: usize) {
         self.viewport_rows = rows.max(1);
         self.ensure_visible();
     }
 
+    /// Returns the rows currently visible in the process table viewport.
     pub fn visible_processes(&self) -> &[ProcessRow] {
         let end = self
             .scroll_offset
@@ -138,6 +169,7 @@ impl AppState {
         &self.snapshot.processes[self.scroll_offset.min(end)..end]
     }
 
+    /// Resolves a UID into a cached display name or falls back to the numeric UID.
     pub fn owner_name(&self, uid: u32) -> String {
         self.username_cache
             .get(&uid)
@@ -145,6 +177,7 @@ impl AppState {
             .unwrap_or_else(|| uid.to_string())
     }
 
+    /// Returns the PID of the currently selected row, if any.
     pub fn selected_pid(&self) -> Option<i32> {
         self.snapshot
             .processes
@@ -152,14 +185,20 @@ impl AppState {
             .map(|row| row.pid)
     }
 
+    /// Builds chart points for the RSS history graph.
     pub fn rss_chart_points(&self) -> Vec<(f64, f64)> {
         history_points(&self.rss_history)
     }
 
+    /// Builds chart points for the swap history graph.
     pub fn swap_chart_points(&self) -> Vec<(f64, f64)> {
         history_points(&self.swap_history)
     }
 
+    /// Applies one keyboard action.
+    ///
+    /// Returns `true` when the caller should terminate the application.
+    /// The mapping is intentionally small and focused on fast navigation.
     pub fn handle_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Char('q') => true,
@@ -237,6 +276,7 @@ impl AppState {
     }
 
     fn ensure_visible(&mut self) {
+        // Keep the selected row inside the current viewport after movement or resize.
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
         }
@@ -260,6 +300,7 @@ impl AppState {
         }
 
         let details = self.collector.collect_visible_memory_details(&pids);
+        // Clear stale detail values first so hidden rows do not keep old `smaps_rollup` data.
         for row in &mut self.snapshot.processes {
             row.uss_bytes = None;
             row.pss_bytes = None;
@@ -281,6 +322,7 @@ impl AppState {
             return;
         }
 
+        // Keep the same PID selected across refreshes when it is still present.
         self.selected = selected_pid
             .and_then(|pid| {
                 self.snapshot
@@ -299,6 +341,9 @@ impl AppState {
     }
 }
 
+/// Compares two rows using the active sort key and PID as a stable tie-breaker.
+///
+/// A deterministic tie-breaker keeps the table stable across refreshes.
 fn compare_process_rows(sort_key: SortKey, left: &ProcessRow, right: &ProcessRow) -> Ordering {
     let primary = match sort_key {
         SortKey::Rss => right.rss_bytes.cmp(&left.rss_bytes),
@@ -316,10 +361,16 @@ fn compare_process_rows(sort_key: SortKey, left: &ProcessRow, right: &ProcessRow
     primary.then_with(|| left.pid.cmp(&right.pid))
 }
 
+/// Sorts the process list in place using the current table policy.
+///
+/// Sorting is done after each refresh and whenever the user changes sort key.
 fn sort_processes(sort_key: SortKey, processes: &mut [ProcessRow]) {
     processes.sort_by(|left, right| compare_process_rows(sort_key, left, right));
 }
 
+/// Converts the fixed-size history buffer into chart coordinates.
+///
+/// X coordinates are sample indices, Y coordinates are raw bytes.
 fn history_points(history: &HistoryBuffer<u64>) -> Vec<(f64, f64)> {
     history
         .into_iter()
@@ -328,6 +379,7 @@ fn history_points(history: &HistoryBuffer<u64>) -> Vec<(f64, f64)> {
         .collect()
 }
 
+/// Loads a small UID-to-name cache from `/etc/passwd` for owner display.
 fn load_username_cache() -> HashMap<u32, String> {
     let Ok(contents) = fs::read_to_string("/etc/passwd") else {
         return HashMap::new();
@@ -354,6 +406,7 @@ fn load_username_cache() -> HashMap<u32, String> {
     users
 }
 
+/// Switches the terminal into raw mode and enters the alternate screen.
 fn setup_terminal() -> io::Result<CrosstermTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -362,6 +415,7 @@ fn setup_terminal() -> io::Result<CrosstermTerminal> {
     Terminal::new(backend)
 }
 
+/// Restores the terminal back to the normal shell state.
 fn restore_terminal(terminal: &mut CrosstermTerminal) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;

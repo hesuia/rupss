@@ -7,6 +7,12 @@ use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Block, Borders, Cell, Chart, Dataset, Paragraph, Row, Table};
 
+/// Draws the complete application frame.
+///
+/// Layout:
+/// - Top: RSS history (left) and swap history (right).
+/// - Middle: system summary panel.
+/// - Bottom: process table.
 pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
@@ -46,6 +52,7 @@ fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: 
     };
 
     let x_max = points.last().map(|(x, _)| *x).unwrap_or(180.0).max(1.0);
+    // Keep a non-zero Y axis so an empty history still renders a valid chart.
     let y_max = points.iter().map(|(_, y)| *y).fold(1.0_f64, f64::max);
 
     let datasets = vec![
@@ -144,6 +151,8 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
+    // The viewport height decides which rows are considered visible and therefore
+    // which PIDs are eligible for `smaps_rollup` collection.
     app.set_viewport_rows(area.height.saturating_sub(3) as usize);
     let header = Row::new([
         "PID", "PPID", "OWNER", "THREAD", "NAME", "COMMAND", "RSS", "USS", "PSS", "SWAP", "CPU",
