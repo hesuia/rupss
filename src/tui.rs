@@ -188,8 +188,8 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
                 Cell::from(row.threads.to_string()),
                 Cell::from(row.name.clone()),
                 Cell::from(row.command.clone()),
-                option_style(row.uss_bytes),
-                option_style(row.pss_bytes),
+                option_cell(row.uss_bytes),
+                option_cell(row.pss_bytes),
                 Cell::from(format_bytes(row.visible_swap_bytes())),
                 Cell::from(format_percent(row.cpu_percent)),
             ])
@@ -226,12 +226,13 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
 /// Styles an optional byte value for display in the process table.
 /// If the value is `Some`, it's formatted as bytes with default styling,
 /// but if it's `None`, it shows a placeholder with dimmed styling to indicate missing data.
-fn option_style(value: Option<u64>) -> Cell<'static> {
-    Cell::from(format_option_bytes(value)).style(if value.is_some() {
+fn option_cell(value: Option<u64>) -> Cell<'static> {
+    let style = if value.is_some() {
         Style::default()
     } else {
         Style::default().fg(Color::DarkGray)
-    })
+    };
+    Cell::from(format_option_bytes(value)).style(style)
 }
 
 #[cfg(test)]
