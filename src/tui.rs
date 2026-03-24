@@ -188,6 +188,7 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
                 Cell::from(row.threads.to_string()),
                 Cell::from(row.name.clone()),
                 Cell::from(row.command.clone()),
+                Cell::from(format_bytes(row.rss_bytes)),
                 option_cell(row.uss_bytes),
                 option_cell(row.pss_bytes),
                 Cell::from(format_bytes(row.visible_swap_bytes())),
