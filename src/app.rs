@@ -127,8 +127,6 @@ impl AppState {
                 },
                 processes: Vec::new(),
             },
-            // sort_key: SortKey::Rss,
-            // sort_ascending: false,
             sort_state: SortState::new(SortKey::Rss, SortDirection::Descending),
             selected: 0,
             scroll_offset: 0,
@@ -160,8 +158,6 @@ impl AppState {
             Ok((mut snapshot, next_cpu, history_point)) => {
                 self.previous_cpu = next_cpu;
                 sort_processes(
-                    // self.sort_key,
-                    // self.sort_ascending,
                     self.sort_state,
                     &self.username_cache,
                     &mut snapshot.processes,
@@ -317,28 +313,10 @@ impl AppState {
     }
 
     fn resort(&mut self, sort_key: SortKey) {
-        // if self.sort_key == sort_key {
-        //     self.sort_ascending = !self.sort_ascending;
-        // } else {
-        //     self.sort_ascending = default_sort_ascending(sort_key);
-        //     self.sort_key = sort_key;
-        // }
-        // let selected_pid = self.selected_pid();
-        // sort_processes(
-        //     sort_key,
-        //     self.sort_ascending,
-        //     &self.username_cache,
-        //     &mut self.snapshot.processes,
-        // );
-        // self.restore_selection(selected_pid, true);
-        // self.populate_visible_details();
         if self.sort_state.key == sort_key {
             self.sort_state.toggle();
         } else {
-            self.sort_state.direction = default_sort_ascending(sort_key)
-                .then_some(SortDirection::Ascending)
-                .unwrap_or(SortDirection::Descending);
-            self.sort_state.key = sort_key;
+            self.sort_state = SortState::new(sort_key, sort_key.default_direction());
         }
         let selected_pid = self.selected_pid();
         sort_processes(
@@ -503,8 +481,6 @@ impl AppState {
 ///
 /// A deterministic tie-breaker keeps the table stable across refreshes.
 fn compare_process_rows(
-    // sort_key: SortKey,
-    // sort_ascending: bool,
     sort_state: SortState,
     username_cache: &HashMap<u32, String>,
     left: &ProcessRow,
@@ -543,8 +519,6 @@ fn compare_process_rows(
 ///
 /// Sorting is done after each refresh and whenever the user changes sort key.
 fn sort_processes(
-    // sort_key: SortKey,
-    // sort_ascending: bool,
     sort_state: SortState,
     username_cache: &HashMap<u32, String>,
     processes: &mut [ProcessRow],
@@ -557,13 +531,6 @@ fn owner_display_name(username_cache: &HashMap<u32, String>, uid: u32) -> String
         .get(&uid)
         .map(|name| name.to_lowercase())
         .unwrap_or_else(|| uid.to_string())
-}
-
-fn default_sort_ascending(sort_key: SortKey) -> bool {
-    matches!(
-        sort_key,
-        SortKey::Pid | SortKey::Ppid | SortKey::Owner | SortKey::Name | SortKey::Command
-    )
 }
 
 /// Converts the fixed-size history buffer into chart coordinates.
