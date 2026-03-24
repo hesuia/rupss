@@ -68,7 +68,7 @@ impl ProcfsCollector {
         let rss_bytes = status
             .vmrss
             .map(|value| value * KIB)
-            .unwrap_or(stat.rss.max(0) as u64 * self.page_size);
+            .unwrap_or(stat.rss * self.page_size);
         let swap_bytes = status.vmswap.unwrap_or(0) * KIB;
 
         let name = truncate_owned(&status.name, MAX_NAME_LEN);

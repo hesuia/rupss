@@ -7,7 +7,6 @@ use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Axis, Block, Borders, Cell, Chart, Dataset, Paragraph, Row, Table};
 
-
 pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
@@ -146,7 +145,7 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 
 fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     app.set_viewport_rows(area.height.saturating_sub(3) as usize);
-    let header = Row::new(vec![
+    let header = Row::new([
         "PID", "PPID", "OWNER", "THREAD", "NAME", "COMMAND", "RSS", "USS", "PSS", "SWAP", "CPU",
     ])
     .style(

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{VecDeque, vec_deque};
 
 #[derive(Debug, Clone)]
 pub struct HistoryBuffer<T> {
@@ -20,12 +20,11 @@ impl<T> HistoryBuffer<T> {
         }
         self.items.push_back(item);
     }
-
 }
 
 impl<'a, T> IntoIterator for &'a HistoryBuffer<T> {
     type Item = &'a T;
-    type IntoIter = std::collections::vec_deque::Iter<'a, T>;
+    type IntoIter = vec_deque::Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.items.iter()
@@ -34,7 +33,7 @@ impl<'a, T> IntoIterator for &'a HistoryBuffer<T> {
 
 impl<T> IntoIterator for HistoryBuffer<T> {
     type Item = T;
-    type IntoIter = std::collections::vec_deque::IntoIter<T>;
+    type IntoIter = vec_deque::IntoIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.items.into_iter()
