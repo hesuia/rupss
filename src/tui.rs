@@ -147,7 +147,7 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                 "Last Error ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(error.clone()),
+            Span::raw(error),
         ]));
     }
 
