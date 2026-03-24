@@ -248,9 +248,9 @@ impl SystemCollector for ProcfsCollector {
     }
 }
 
-    /// Converts a change in process CPU ticks into a human-readable percentage.
-    ///
-    /// The result is a per-process percentage, not normalized by CPU count.
+/// Converts a change in process CPU ticks into a human-readable percentage.
+///
+/// The result is a per-process percentage, not normalized by CPU count.
 fn calculate_cpu_percent(
     previous: &CpuSample,
     total_time_ticks: u64,
