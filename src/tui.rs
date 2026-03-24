@@ -1,4 +1,4 @@
-use crate::app::{AppState, PROCESS_TABLE_COLUMN_WIDTHS, ViewMode};
+use crate::app::{AppState, ViewMode, process_table_column_widths};
 use crate::format::{format_bytes, format_option_bytes, format_percent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -205,7 +205,7 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
 
     let table = Table::new(
         rows,
-        PROCESS_TABLE_COLUMN_WIDTHS.map(Constraint::Length),
+        process_table_column_widths(app.view_mode).map(Constraint::Length),
     )
     .header(header)
     .block(
@@ -268,6 +268,21 @@ mod tests {
     #[test]
     fn chart_upper_bound_falls_back_to_one_for_zero() {
         assert_eq!(chart_y_upper_bound(0), 1);
+    }
+
+    #[test]
+    fn format_tree_name_renders_root_toggle_without_leading_padding() {
+        let root = TreeRow {
+            process_index: 0,
+            depth: 0,
+            has_children: true,
+            expanded: false,
+            parent_index: None,
+            is_last_sibling: false,
+            ancestor_has_next_sibling: Vec::new(),
+        };
+
+        assert_eq!(format_tree_name(&root, "init"), "[+] init");
     }
 
     #[test]

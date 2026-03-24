@@ -25,9 +25,17 @@ const HISTORY_CAPACITY: usize = 180;
 const TICK_RATE: Duration = Duration::from_secs(1);
 const EVENT_POLL: Duration = Duration::from_millis(250);
 pub(crate) const PROCESS_TABLE_COLUMN_SPACING: u16 = 1;
-pub(crate) const PROCESS_TABLE_COLUMN_WIDTHS: [u16; 11] = [7, 7, 12, 8, 24, 24, 12, 12, 12, 12, 8];
+const PROCESS_TABLE_COLUMN_WIDTHS_FLAT: [u16; 11] = [7, 7, 12, 8, 24, 24, 12, 12, 12, 12, 8];
+const PROCESS_TABLE_COLUMN_WIDTHS_TREE: [u16; 11] = [7, 7, 12, 8, 32, 16, 12, 12, 12, 12, 8];
 const NAME_COLUMN_INDEX: usize = 4;
 type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+pub(crate) fn process_table_column_widths(view_mode: ViewMode) -> [u16; 11] {
+    match view_mode {
+        ViewMode::Flat => PROCESS_TABLE_COLUMN_WIDTHS_FLAT,
+        ViewMode::Tree => PROCESS_TABLE_COLUMN_WIDTHS_TREE,
+    }
+}
 
 /// Result of handling one key input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -712,13 +720,14 @@ impl AppState {
 
     fn name_column_bounds(&self) -> Option<(u16, u16)> {
         let area = self.process_table_area?;
+        let column_widths = process_table_column_widths(self.view_mode);
         let mut start = area.x.saturating_add(1);
-        for width in PROCESS_TABLE_COLUMN_WIDTHS.iter().take(NAME_COLUMN_INDEX) {
+        for width in column_widths.iter().take(NAME_COLUMN_INDEX) {
             start = start
                 .saturating_add(*width)
                 .saturating_add(PROCESS_TABLE_COLUMN_SPACING);
         }
-        Some((start, PROCESS_TABLE_COLUMN_WIDTHS[NAME_COLUMN_INDEX]))
+        Some((start, column_widths[NAME_COLUMN_INDEX]))
     }
 
     fn rebuild_tree_rows(&mut self) {
@@ -796,10 +805,8 @@ impl AppState {
             });
             if expanded {
                 let mut child_guides = ancestor_has_next_sibling.to_vec();
-                if depth > 0 {
-                    child_guides.push(!is_last_sibling);
-                }
-                let child_count = children[index].len();
+                child_guides.push(!is_last_sibling);
+                let child_count: usize = children[index].len();
                 for (child_idx, &child) in children[index].iter().enumerate() {
                     push_visible_rows(
                         rows,
@@ -964,7 +971,7 @@ fn restore_terminal(terminal: &mut CrosstermTerminal) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, KeyAction, ViewMode, compare_process_rows, history_points};
+    use super::{AppState, KeyAction, TreeRow, ViewMode, compare_process_rows, history_points};
     use crate::collector::ProcfsCollector;
     use crate::history::HistoryBuffer;
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
@@ -1435,5 +1442,61 @@ mod tests {
             .collect();
 
         assert_eq!(visible, vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn tree_mode_keeps_multiple_unresolved_roots_visible() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.snapshot.processes = vec![
+            tree_row(1, 0),
+            tree_row(2, 9999),
+            tree_row(3, -1),
+            tree_row(4, 4),
+            tree_row(5, 1),
+        ];
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+
+        let visible: Vec<i32> = app
+            .visible_row_entries()
+            .into_iter()
+            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .collect();
+
+        assert_eq!(visible, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn tree_child_of_non_last_root_tracks_root_vertical_guide() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
+        app.expanded_pids.insert(1);
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+
+        let child = app
+            .visible_row_entries()
+            .into_iter()
+            .find(|entry| app.snapshot.processes[entry.process_index].pid == 2)
+            .unwrap();
+
+        assert_eq!(child.ancestor_has_next_sibling, vec![true]);
+    }
+
+    #[test]
+    fn root_tree_toggle_starts_at_name_column() {
+        let row = TreeRow {
+            process_index: 0,
+            depth: 0,
+            has_children: true,
+            expanded: false,
+            parent_index: None,
+            is_last_sibling: false,
+            ancestor_has_next_sibling: Vec::new(),
+        };
+
+        assert_eq!(row.name_toggle_range(), Some((0, 3)));
     }
 }
