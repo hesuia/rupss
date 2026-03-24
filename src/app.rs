@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 const HISTORY_CAPACITY: usize = 180;
 const TICK_RATE: Duration = Duration::from_secs(1);
 const EVENT_POLL: Duration = Duration::from_millis(250);
+type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 pub struct AppState {
     pub snapshot: Snapshot,
@@ -40,7 +41,7 @@ pub fn run() -> io::Result<()> {
     result
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
+fn run_app(terminal: &mut CrosstermTerminal) -> io::Result<()> {
     let collector = ProcfsCollector::new();
     let mut app = AppState::new(collector);
     app.refresh()?;
@@ -353,7 +354,7 @@ fn load_username_cache() -> HashMap<u32, String> {
     users
 }
 
-fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
+fn setup_terminal() -> io::Result<CrosstermTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -361,7 +362,7 @@ fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     Terminal::new(backend)
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
+fn restore_terminal(terminal: &mut CrosstermTerminal) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
