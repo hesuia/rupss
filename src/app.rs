@@ -83,10 +83,11 @@ fn run_app(terminal: &mut CrosstermTerminal) -> io::Result<()> {
         if event::poll(EVENT_POLL)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.kind == KeyEventKind::Press
-                        && matches!(app.handle_key(key.code), KeyAction::Quit)
-                    {
-                        return Ok(());
+                    if key.kind == KeyEventKind::Press {
+                        match app.handle_key(key.code) {
+                            KeyAction::Quit => return Ok(()),
+                            KeyAction::Continue => {}
+                        }
                     }
                 }
                 Event::Mouse(mouse) => app.handle_mouse(mouse),
@@ -254,23 +255,19 @@ impl AppState {
                 KeyAction::Continue
             }
             KeyCode::Char('r') => {
-                self.sort_key = SortKey::Rss;
-                self.resort();
+                self.resort(SortKey::Rss);
                 KeyAction::Continue
             }
             KeyCode::Char('s') => {
-                self.sort_key = SortKey::Swap;
-                self.resort();
+                self.resort(SortKey::Swap);
                 KeyAction::Continue
             }
             KeyCode::Char('p') => {
-                self.sort_key = SortKey::Pss;
-                self.resort();
+                self.resort(SortKey::Pss);
                 KeyAction::Continue
             }
             KeyCode::Char('c') => {
-                self.sort_key = SortKey::Cpu;
-                self.resort();
+                self.resort(SortKey::Cpu);
                 KeyAction::Continue
             }
             _ => KeyAction::Continue,
@@ -293,9 +290,10 @@ impl AppState {
         }
     }
 
-    fn resort(&mut self) {
+    fn resort(&mut self, sort_key: SortKey) {
+        self.sort_key = sort_key;
         let selected_pid = self.selected_pid();
-        sort_processes(self.sort_key, &mut self.snapshot.processes);
+        sort_processes(sort_key, &mut self.snapshot.processes);
         self.restore_selection(selected_pid, true);
         self.populate_visible_details();
     }
