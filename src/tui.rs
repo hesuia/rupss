@@ -1,4 +1,4 @@
-use crate::app::AppState;
+use crate::app::{AppState, PROCESS_TABLE_COLUMN_WIDTHS, ViewMode};
 use crate::format::{format_bytes, format_option_bytes, format_percent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -129,11 +129,15 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "count {} / agg-rss {} / agg-swap {} / sort {} / selected {} / age {}ms",
+                "count {} / agg-rss {} / agg-swap {} / sort {} / mode {} / selected {} / age {}ms",
                 system.process_count,
                 format_bytes(system.total_process_rss),
                 format_bytes(system.total_process_swap),
                 app.sort_state.label(),
+                match app.view_mode {
+                    ViewMode::Flat => "flat",
+                    ViewMode::Tree => "tree",
+                },
                 app.selected_pid()
                     .map_or("-".to_string(), |pid| pid.to_string()),
                 app.snapshot.captured_at.elapsed().as_millis()
@@ -170,58 +174,47 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows = app
-        .visible_processes()
-        .iter()
-        .enumerate()
-        .map(|(visible_idx, row)| {
-            let style = if app.scroll_offset + visible_idx == app.selected {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
-            } else {
-                Style::default()
-            };
+    let visible_rows = app.visible_row_entries();
+    let rows = visible_rows.iter().enumerate().map(|(visible_idx, entry)| {
+        let row = &app.snapshot.processes[entry.process_index];
+        let style = if app.selected_visible_index() == Some(app.scroll_offset + visible_idx) {
+            Style::default().bg(Color::DarkGray).fg(Color::White)
+        } else {
+            Style::default()
+        };
+        let name_cell = match app.view_mode {
+            ViewMode::Flat => row.name.clone(),
+            ViewMode::Tree => format_tree_name(entry, &row.name),
+        };
 
-            Row::new(vec![
-                Cell::from(row.pid.to_string()),
-                Cell::from(row.ppid.to_string()),
-                Cell::from(app.owner_name(row.owner_uid)),
-                Cell::from(row.threads.to_string()),
-                Cell::from(row.name.clone()),
-                Cell::from(row.command.clone()),
-                Cell::from(format_bytes(row.rss_bytes)),
-                option_cell(row.uss_bytes),
-                option_cell(row.pss_bytes),
-                Cell::from(format_bytes(row.visible_swap_bytes())),
-                Cell::from(format_percent(row.cpu_percent)),
-            ])
-            .style(style)
-        });
+        Row::new(vec![
+            Cell::from(row.pid.to_string()),
+            Cell::from(row.ppid.to_string()),
+            Cell::from(app.owner_name(row.owner_uid)),
+            Cell::from(row.threads.to_string()),
+            Cell::from(name_cell),
+            Cell::from(row.command.clone()),
+            Cell::from(format_bytes(row.rss_bytes)),
+            option_cell(row.uss_bytes),
+            option_cell(row.pss_bytes),
+            Cell::from(format_bytes(row.visible_swap_bytes())),
+            Cell::from(format_percent(row.cpu_percent)),
+        ])
+        .style(style)
+    });
 
     let table = Table::new(
         rows,
-        [
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(12),
-            Constraint::Length(8),
-            Constraint::Length(18),
-            Constraint::Min(24),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(8),
-        ],
+        PROCESS_TABLE_COLUMN_WIDTHS.map(Constraint::Length),
     )
     .header(header)
     .block(
-        Block::default()
-            .title(
-                "Processes  q:quit  arrows/jk:move  click:select  PgUp/PgDn:page  i/p/o/n/m/r/s/c:sort",
+        Block::default().title(
+                "Processes  q:quit  t:tree  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page  i/p/o/n/m/r/s/c:sort",
             )
             .borders(Borders::ALL),
     )
-    .column_spacing(1);
+    .column_spacing(crate::app::PROCESS_TABLE_COLUMN_SPACING);
 
     frame.render_widget(table, area);
 }
@@ -238,9 +231,45 @@ fn option_cell(value: Option<u64>) -> Cell<'static> {
     Cell::from(format_option_bytes(value)).style(style)
 }
 
+fn format_tree_name(entry: &crate::app::TreeRow, name: &str) -> String {
+    let mut prefix = String::new();
+    for has_next in entry.ancestor_has_next_sibling.iter() {
+        // if has_next {
+        //     prefix.push_str("│  ");
+        // } else {
+        //     prefix.push_str("   ");
+        // }
+        prefix.push_str(if *has_next { "│  " } else { "   " });
+    }
+
+    if entry.depth > 0 {
+        // if entry.is_last_sibling {
+        //     prefix.push_str("└─");
+        // } else {
+        //     prefix.push_str("├─");
+        // }
+        prefix.push_str(if entry.is_last_sibling { "└─" } else { "├─" });
+    }
+
+    if entry.has_children {
+        // if entry.expanded {
+        //     prefix.push_str("[-] ");
+        // } else {
+        //     prefix.push_str("[+] ");
+        // }
+        prefix.push_str(if entry.expanded { "[-] " } else { "[+] " });
+    } else if entry.depth > 0 {
+        prefix.push(' ');
+    }
+
+    prefix.push_str(name);
+    prefix
+}
+
 #[cfg(test)]
 mod tests {
-    use super::chart_y_upper_bound;
+    use super::{chart_y_upper_bound, format_tree_name};
+    use crate::app::TreeRow;
 
     #[test]
     fn chart_upper_bound_uses_total_when_non_zero() {
@@ -250,5 +279,30 @@ mod tests {
     #[test]
     fn chart_upper_bound_falls_back_to_one_for_zero() {
         assert_eq!(chart_y_upper_bound(0), 1);
+    }
+
+    #[test]
+    fn format_tree_name_uses_branch_markers() {
+        let parent = TreeRow {
+            process_index: 0,
+            depth: 1,
+            has_children: true,
+            expanded: false,
+            parent_index: Some(0),
+            is_last_sibling: false,
+            ancestor_has_next_sibling: vec![true],
+        };
+        let leaf = TreeRow {
+            process_index: 1,
+            depth: 2,
+            has_children: false,
+            expanded: false,
+            parent_index: Some(0),
+            is_last_sibling: true,
+            ancestor_has_next_sibling: vec![true, false],
+        };
+
+        assert_eq!(format_tree_name(&parent, "bash"), "│  ├─[+] bash");
+        assert_eq!(format_tree_name(&leaf, "worker"), "│     └─ worker");
     }
 }

@@ -16,7 +16,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 const HISTORY_CAPACITY: usize = 180;
 const TICK_RATE: Duration = Duration::from_secs(1);
 const EVENT_POLL: Duration = Duration::from_millis(250);
+pub(crate) const PROCESS_TABLE_COLUMN_SPACING: u16 = 1;
+pub(crate) const PROCESS_TABLE_COLUMN_WIDTHS: [u16; 11] = [7, 7, 12, 8, 24, 24, 12, 12, 12, 12, 8];
+const NAME_COLUMN_INDEX: usize = 4;
 type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 /// Result of handling one key input.
@@ -31,6 +34,23 @@ type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 pub enum KeyAction {
     Continue,
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Flat,
+    Tree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TreeRow {
+    pub(crate) process_index: usize,
+    pub(crate) depth: usize,
+    pub(crate) has_children: bool,
+    pub(crate) expanded: bool,
+    pub(crate) parent_index: Option<usize>,
+    pub(crate) is_last_sibling: bool,
+    pub(crate) ancestor_has_next_sibling: Vec<bool>,
 }
 
 /// Mutable application state shared by the collector and the renderer.
@@ -51,11 +71,15 @@ pub struct AppState {
     pub selected: usize,
     /// Absolute start index of the visible table window.
     pub scroll_offset: usize,
+    pub view_mode: ViewMode,
     viewport_rows: usize,
     username_cache: HashMap<u32, String>,
     rss_history: HistoryBuffer<u64>,
     swap_history: HistoryBuffer<u64>,
     previous_cpu: HashMap<i32, CpuSample>,
+    expanded_pids: HashSet<i32>,
+    tree_rows: Vec<TreeRow>,
+    tree_parents: Vec<Option<usize>>,
     collector: ProcfsCollector,
     process_table_area: Option<Rect>,
     /// Most recent collection error kept for on-screen display.
@@ -130,11 +154,15 @@ impl AppState {
             sort_state: SortState::new(SortKey::Rss, SortDirection::Descending),
             selected: 0,
             scroll_offset: 0,
+            view_mode: ViewMode::Flat,
             viewport_rows: 20,
             username_cache: load_username_cache(),
             rss_history: HistoryBuffer::new(HISTORY_CAPACITY),
             swap_history: HistoryBuffer::new(HISTORY_CAPACITY),
             previous_cpu: HashMap::new(),
+            expanded_pids: HashSet::new(),
+            tree_rows: Vec::new(),
+            tree_parents: Vec::new(),
             collector,
             process_table_area: None,
             last_error: None,
@@ -163,6 +191,7 @@ impl AppState {
                     &mut snapshot.processes,
                 );
                 self.snapshot = snapshot;
+                self.rebuild_tree_rows();
                 self.restore_selection(selected_pid, false);
                 self.push_history(history_point);
                 self.populate_visible_details();
@@ -180,15 +209,6 @@ impl AppState {
     pub fn set_viewport_rows(&mut self, rows: usize) {
         self.viewport_rows = rows.max(1);
         self.clamp_scroll_offset();
-    }
-
-    /// Returns the rows currently visible in the process table viewport.
-    pub fn visible_processes(&self) -> &[ProcessRow] {
-        let end = self
-            .scroll_offset
-            .saturating_add(self.viewport_rows)
-            .min(self.snapshot.processes.len());
-        &self.snapshot.processes[self.scroll_offset.min(end)..end]
     }
 
     /// Stores the process table area from the most recent frame.
@@ -210,6 +230,61 @@ impl AppState {
             .processes
             .get(self.selected)
             .map(|row| row.pid)
+    }
+
+    pub(crate) fn visible_row_entries(&self) -> Vec<TreeRow> {
+        match self.view_mode {
+            ViewMode::Flat => {
+                let end = self
+                    .scroll_offset
+                    .saturating_add(self.viewport_rows)
+                    .min(self.snapshot.processes.len());
+                (self.scroll_offset.min(end)..end)
+                    .map(|process_index| TreeRow {
+                        process_index,
+                        depth: 0,
+                        has_children: false,
+                        expanded: false,
+                        parent_index: None,
+                        is_last_sibling: true,
+                        ancestor_has_next_sibling: Vec::new(),
+                    })
+                    .collect()
+            }
+            ViewMode::Tree => {
+                let end = self
+                    .scroll_offset
+                    .saturating_add(self.viewport_rows)
+                    .min(self.tree_rows.len());
+                self.tree_rows[self.scroll_offset.min(end)..end].to_vec()
+            }
+        }
+    }
+
+    pub fn total_visible_rows(&self) -> usize {
+        match self.view_mode {
+            ViewMode::Flat => self.snapshot.processes.len(),
+            ViewMode::Tree => self.tree_rows.len(),
+        }
+    }
+
+    pub fn selected_visible_index(&self) -> Option<usize> {
+        match self.view_mode {
+            ViewMode::Flat => {
+                if self.snapshot.processes.is_empty() {
+                    None
+                } else {
+                    Some(
+                        self.selected
+                            .min(self.snapshot.processes.len().saturating_sub(1)),
+                    )
+                }
+            }
+            ViewMode::Tree => self
+                .tree_rows
+                .iter()
+                .position(|row| row.process_index == self.selected),
+        }
     }
 
     /// Builds chart points for the RSS history graph.
@@ -249,15 +324,41 @@ impl AppState {
                 KeyAction::Continue
             }
             KeyCode::Home => {
-                self.selected = 0;
+                self.selected = match self.view_mode {
+                    ViewMode::Flat => 0,
+                    ViewMode::Tree => self
+                        .tree_rows
+                        .first()
+                        .map(|row| row.process_index)
+                        .unwrap_or(0),
+                };
                 self.ensure_visible();
                 self.populate_visible_details();
                 KeyAction::Continue
             }
             KeyCode::End => {
-                self.selected = self.snapshot.processes.len().saturating_sub(1);
+                self.selected = match self.view_mode {
+                    ViewMode::Flat => self.snapshot.processes.len().saturating_sub(1),
+                    ViewMode::Tree => self
+                        .tree_rows
+                        .last()
+                        .map(|row| row.process_index)
+                        .unwrap_or(0),
+                };
                 self.ensure_visible();
                 self.populate_visible_details();
+                KeyAction::Continue
+            }
+            KeyCode::Left => {
+                self.handle_tree_left();
+                KeyAction::Continue
+            }
+            KeyCode::Right => {
+                self.handle_tree_right();
+                KeyAction::Continue
+            }
+            KeyCode::Char('t') => {
+                self.toggle_view_mode();
                 KeyAction::Continue
             }
             KeyCode::Char('i') => {
@@ -324,18 +425,28 @@ impl AppState {
             &self.username_cache,
             &mut self.snapshot.processes,
         );
+        self.rebuild_tree_rows();
         self.restore_selection(selected_pid, true);
         self.populate_visible_details();
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.snapshot.processes.is_empty() {
+        if self.total_visible_rows() == 0 {
             return;
         }
+        if self.view_mode == ViewMode::Tree {
+            self.ensure_tree_selection_visible();
+        }
 
-        let max_index = self.snapshot.processes.len().saturating_sub(1) as isize;
-        let next = (self.selected as isize + delta).clamp(0, max_index) as usize;
-        self.selected = next;
+        let Some(current) = self.selected_visible_index() else {
+            return;
+        };
+        let max_index = self.total_visible_rows().saturating_sub(1) as isize;
+        let next = (current as isize + delta).clamp(0, max_index) as usize;
+        self.selected = match self.view_mode {
+            ViewMode::Flat => next,
+            ViewMode::Tree => self.tree_rows[next].process_index,
+        };
         self.ensure_visible();
         self.populate_visible_details();
     }
@@ -361,12 +472,19 @@ impl AppState {
         }
 
         let data_row = row.saturating_sub(first_data_row) as usize;
-        let visible_len = self.visible_processes().len();
-        if data_row >= visible_len {
+        let visible_rows = self.visible_row_entries();
+        if data_row >= visible_rows.len() {
             return;
         }
 
-        self.selected = self.scroll_offset.saturating_add(data_row);
+        let clicked = &visible_rows[data_row];
+        if self.is_tree_toggle_click(column, clicked) {
+            self.selected = clicked.process_index;
+            self.toggle_expansion(clicked.process_index);
+            return;
+        }
+
+        self.selected = clicked.process_index;
         self.ensure_visible();
         self.populate_visible_details();
     }
@@ -375,7 +493,7 @@ impl AppState {
         if !self.is_inside_process_table(column, row) {
             return;
         }
-        if self.snapshot.processes.is_empty() {
+        if self.total_visible_rows() == 0 {
             return;
         }
 
@@ -399,30 +517,35 @@ impl AppState {
 
     fn ensure_visible(&mut self) {
         // Keep the selected row inside the current viewport after movement or resize.
-        if self.selected < self.scroll_offset {
-            self.scroll_offset = self.selected;
+        let selected_visible = match self.view_mode {
+            ViewMode::Flat => self.selected,
+            ViewMode::Tree => self.selected_visible_index().unwrap_or(0),
+        };
+
+        if selected_visible < self.scroll_offset {
+            self.scroll_offset = selected_visible;
         }
 
         let view_end = self.scroll_offset.saturating_add(self.viewport_rows);
-        if self.selected >= view_end {
-            self.scroll_offset = self
-                .selected
-                .saturating_sub(self.viewport_rows.saturating_sub(1));
+        if selected_visible >= view_end {
+            self.scroll_offset =
+                selected_visible.saturating_sub(self.viewport_rows.saturating_sub(1));
         }
         self.clamp_scroll_offset();
     }
 
     fn clamp_scroll_offset(&mut self) {
         let max_offset = self
-            .snapshot
-            .processes
-            .len()
+            .total_visible_rows()
             .saturating_sub(self.viewport_rows.max(1));
         self.scroll_offset = self.scroll_offset.min(max_offset);
     }
 
     fn visible_pids(&self) -> Vec<i32> {
-        self.visible_processes().iter().map(|row| row.pid).collect()
+        self.visible_row_entries()
+            .into_iter()
+            .map(|entry| self.snapshot.processes[entry.process_index].pid)
+            .collect()
     }
 
     fn populate_visible_details(&mut self) {
@@ -464,6 +587,9 @@ impl AppState {
             })
             .unwrap_or(0)
             .min(self.snapshot.processes.len().saturating_sub(1));
+        if self.view_mode == ViewMode::Tree {
+            self.ensure_tree_selection_visible();
+        }
         if ensure_visible {
             self.ensure_visible();
         } else {
@@ -474,6 +600,250 @@ impl AppState {
     fn push_history(&mut self, point: HistoryPoint) {
         self.rss_history.push(point.rss_bytes);
         self.swap_history.push(point.swap_bytes);
+    }
+
+    fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Flat => ViewMode::Tree,
+            ViewMode::Tree => ViewMode::Flat,
+        };
+        if self.view_mode == ViewMode::Tree {
+            self.ensure_tree_selection_visible();
+        }
+        self.ensure_visible();
+        self.populate_visible_details();
+    }
+
+    fn handle_tree_left(&mut self) {
+        if self.view_mode != ViewMode::Tree {
+            return;
+        }
+        self.ensure_tree_selection_visible();
+        let Some(current) = self.selected_visible_index() else {
+            return;
+        };
+        let row = &self.tree_rows[current];
+        let pid = self.snapshot.processes[row.process_index].pid;
+        if row.has_children && row.expanded {
+            self.expanded_pids.remove(&pid);
+            self.rebuild_tree_rows();
+        } else if let Some(parent_index) = row.parent_index {
+            self.selected = parent_index;
+        }
+        self.ensure_visible();
+        self.populate_visible_details();
+    }
+
+    fn handle_tree_right(&mut self) {
+        if self.view_mode != ViewMode::Tree {
+            return;
+        }
+        self.ensure_tree_selection_visible();
+        let Some(current) = self.selected_visible_index() else {
+            return;
+        };
+        let row = &self.tree_rows[current];
+        let pid = self.snapshot.processes[row.process_index].pid;
+        if row.has_children && !row.expanded {
+            self.expanded_pids.insert(pid);
+            self.rebuild_tree_rows();
+        } else if row.has_children && row.expanded {
+            if let Some(next_row) = self.tree_rows.get(current + 1) {
+                if next_row.parent_index == Some(row.process_index) {
+                    self.selected = next_row.process_index;
+                }
+            }
+        }
+        self.ensure_visible();
+        self.populate_visible_details();
+    }
+
+    fn toggle_expansion(&mut self, process_index: usize) {
+        let pid = self.snapshot.processes[process_index].pid;
+        if !self.expanded_pids.insert(pid) {
+            self.expanded_pids.remove(&pid);
+        }
+        self.rebuild_tree_rows();
+        self.ensure_tree_selection_visible();
+        self.ensure_visible();
+        self.populate_visible_details();
+    }
+
+    fn ensure_tree_selection_visible(&mut self) {
+        if self.view_mode != ViewMode::Tree || self.selected >= self.snapshot.processes.len() {
+            return;
+        }
+
+        let mut current = Some(self.selected);
+        let mut changed = false;
+        while let Some(index) =
+            current.and_then(|index| self.tree_parents.get(index).copied().flatten())
+        {
+            let pid = self.snapshot.processes[index].pid;
+            changed |= self.expanded_pids.insert(pid);
+            current = Some(index);
+        }
+        if changed {
+            self.rebuild_tree_rows();
+        }
+    }
+
+    fn is_tree_toggle_click(&self, column: u16, row: &TreeRow) -> bool {
+        if self.view_mode != ViewMode::Tree || !row.has_children {
+            return false;
+        }
+
+        let Some((name_start, name_width)) = self.name_column_bounds() else {
+            return false;
+        };
+        let Some((toggle_offset, toggle_width)) = row.name_toggle_range() else {
+            return false;
+        };
+
+        let name_end = name_start.saturating_add(name_width.saturating_sub(1));
+        if column < name_start || column > name_end {
+            return false;
+        }
+
+        let toggle_start = name_start.saturating_add(toggle_offset);
+        let toggle_end = toggle_start.saturating_add(toggle_width.saturating_sub(1));
+        column >= toggle_start && column <= toggle_end
+    }
+
+    fn name_column_bounds(&self) -> Option<(u16, u16)> {
+        let area = self.process_table_area?;
+        let mut start = area.x.saturating_add(1);
+        for width in PROCESS_TABLE_COLUMN_WIDTHS.iter().take(NAME_COLUMN_INDEX) {
+            start = start
+                .saturating_add(*width)
+                .saturating_add(PROCESS_TABLE_COLUMN_SPACING);
+        }
+        Some((start, PROCESS_TABLE_COLUMN_WIDTHS[NAME_COLUMN_INDEX]))
+    }
+
+    fn rebuild_tree_rows(&mut self) {
+        let len = self.snapshot.processes.len();
+        self.tree_rows.clear();
+        self.tree_parents = vec![None; len];
+        if len == 0 {
+            self.expanded_pids.clear();
+            return;
+        }
+
+        let mut pid_to_index = HashMap::with_capacity(len);
+        for (index, row) in self.snapshot.processes.iter().enumerate() {
+            pid_to_index.insert(row.pid, index);
+        }
+
+        self.expanded_pids
+            .retain(|pid| pid_to_index.contains_key(pid));
+
+        let mut children = vec![Vec::new(); len];
+        let mut roots = Vec::new();
+        for (index, row) in self.snapshot.processes.iter().enumerate() {
+            let parent_index = if row.ppid <= 0 || row.ppid == row.pid {
+                None
+            } else {
+                pid_to_index.get(&row.ppid).copied()
+            };
+            if let Some(parent_index) = parent_index {
+                self.tree_parents[index] = Some(parent_index);
+                children[parent_index].push(index);
+            } else {
+                roots.push(index);
+            }
+        }
+
+        let sort_state = self.sort_state;
+        let username_cache = &self.username_cache;
+        let processes = &self.snapshot.processes;
+        let sort_indexes = |indexes: &mut Vec<usize>| {
+            indexes.sort_by(|left, right| {
+                compare_process_rows(
+                    sort_state,
+                    username_cache,
+                    &processes[*left],
+                    &processes[*right],
+                )
+            });
+        };
+        sort_indexes(&mut roots);
+        for child_indexes in &mut children {
+            sort_indexes(child_indexes);
+        }
+
+        fn push_visible_rows(
+            rows: &mut Vec<TreeRow>,
+            processes: &[ProcessRow],
+            children: &[Vec<usize>],
+            expanded_pids: &HashSet<i32>,
+            parents: &[Option<usize>],
+            index: usize,
+            depth: usize,
+            is_last_sibling: bool,
+            ancestor_has_next_sibling: &[bool],
+        ) {
+            let has_children = !children[index].is_empty();
+            let expanded = has_children && expanded_pids.contains(&processes[index].pid);
+            rows.push(TreeRow {
+                process_index: index,
+                depth,
+                has_children,
+                expanded,
+                parent_index: parents[index],
+                is_last_sibling,
+                ancestor_has_next_sibling: ancestor_has_next_sibling.to_vec(),
+            });
+            if expanded {
+                let mut child_guides = ancestor_has_next_sibling.to_vec();
+                if depth > 0 {
+                    child_guides.push(!is_last_sibling);
+                }
+                let child_count = children[index].len();
+                for (child_idx, &child) in children[index].iter().enumerate() {
+                    push_visible_rows(
+                        rows,
+                        processes,
+                        children,
+                        expanded_pids,
+                        parents,
+                        child,
+                        depth + 1,
+                        child_idx + 1 == child_count,
+                        &child_guides,
+                    );
+                }
+            }
+        }
+
+        let root_count = roots.len();
+        for (root_idx, root) in roots.into_iter().enumerate() {
+            push_visible_rows(
+                &mut self.tree_rows,
+                &self.snapshot.processes,
+                &children,
+                &self.expanded_pids,
+                &self.tree_parents,
+                root,
+                0,
+                root_idx + 1 == root_count,
+                &[],
+            );
+        }
+    }
+}
+
+impl TreeRow {
+    pub(crate) fn name_toggle_range(&self) -> Option<(u16, u16)> {
+        if !self.has_children {
+            return None;
+        }
+
+        let mut offset = (self.ancestor_has_next_sibling.len() as u16).saturating_mul(3);
+        if self.depth > 0 {
+            offset = offset.saturating_add(2);
+        }
+        Some((offset, 3))
     }
 }
 
@@ -594,7 +964,7 @@ fn restore_terminal(terminal: &mut CrosstermTerminal) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, KeyAction, compare_process_rows, history_points};
+    use super::{AppState, KeyAction, ViewMode, compare_process_rows, history_points};
     use crate::collector::ProcfsCollector;
     use crate::history::HistoryBuffer;
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
@@ -617,6 +987,12 @@ mod tests {
             detailed_swap_bytes: None,
             cpu_percent: pid as f32,
         }
+    }
+
+    fn tree_row(pid: i32, ppid: i32) -> ProcessRow {
+        let mut row = sample_row(pid);
+        row.ppid = ppid;
+        row
     }
 
     #[test]
@@ -933,5 +1309,131 @@ mod tests {
 
         assert_eq!(app.selected, 0);
         assert_eq!(app.scroll_offset, 3);
+    }
+
+    #[test]
+    fn tree_mode_starts_with_roots_only() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.snapshot.processes = vec![
+            tree_row(1, 0),
+            tree_row(2, 1),
+            tree_row(3, 1),
+            tree_row(4, 0),
+        ];
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+
+        let visible: Vec<i32> = app
+            .visible_row_entries()
+            .into_iter()
+            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .collect();
+
+        assert_eq!(app.view_mode, ViewMode::Tree);
+        assert_eq!(visible, vec![1, 4]);
+    }
+
+    #[test]
+    fn tree_right_expands_and_left_collapses() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 2)];
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+
+        app.handle_key(KeyCode::Right);
+        let visible_after_expand: Vec<i32> = app
+            .visible_row_entries()
+            .into_iter()
+            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .collect();
+        assert_eq!(visible_after_expand, vec![1, 2]);
+
+        app.handle_key(KeyCode::Left);
+        let visible_after_collapse: Vec<i32> = app
+            .visible_row_entries()
+            .into_iter()
+            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .collect();
+        assert_eq!(visible_after_collapse, vec![1]);
+    }
+
+    #[test]
+    fn tree_gutter_click_toggles_expansion() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+        app.set_viewport_rows(5);
+        app.set_process_table_area(Rect::new(0, 0, 120, 8));
+        let (name_start, _) = app.name_column_bounds().unwrap();
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: name_start,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        let visible: Vec<i32> = app
+            .visible_row_entries()
+            .into_iter()
+            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .collect();
+        assert_eq!(visible, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn tree_name_branch_click_selects_without_toggling() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
+        app.rebuild_tree_rows();
+        app.expanded_pids.insert(1);
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+        app.set_viewport_rows(5);
+        app.set_process_table_area(Rect::new(0, 0, 120, 8));
+        let (name_start, _) = app.name_column_bounds().unwrap();
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: name_start,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.selected_pid(), Some(2));
+        let visible: Vec<i32> = app
+            .visible_row_entries()
+            .into_iter()
+            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .collect();
+        assert_eq!(visible, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn tree_sort_reorders_siblings_without_breaking_hierarchy() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        let mut parent = tree_row(1, 0);
+        parent.rss_bytes = 100;
+        let mut child_a = tree_row(2, 1);
+        child_a.rss_bytes = 10;
+        let mut child_b = tree_row(3, 1);
+        child_b.rss_bytes = 50;
+        app.snapshot.processes = vec![parent, child_a, child_b];
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+        app.handle_key(KeyCode::Right);
+
+        let visible: Vec<i32> = app
+            .visible_row_entries()
+            .into_iter()
+            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .collect();
+
+        assert_eq!(visible, vec![1, 3, 2]);
     }
 }
