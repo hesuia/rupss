@@ -35,11 +35,12 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
 }
 
 fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: bool) {
-    let (title, points, latest_value, color) = if rss {
+    let (title, points, latest_value, y_axis_upper, color) = if rss {
         (
             "RSS History",
             app.rss_chart_points(),
             app.snapshot.system.total_process_rss,
+            chart_y_upper_bound(app.snapshot.system.mem_total),
             Color::LightGreen,
         )
     } else {
@@ -47,13 +48,13 @@ fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: 
             "Swap History",
             app.swap_chart_points(),
             app.snapshot.system.total_process_swap,
+            chart_y_upper_bound(app.snapshot.system.swap_total),
             Color::LightBlue,
         )
     };
 
     let x_max = points.last().map(|(x, _)| *x).unwrap_or(180.0).max(1.0);
-    // Keep a non-zero Y axis so an empty history still renders a valid chart.
-    let y_max = points.iter().map(|(_, y)| *y).fold(1.0_f64, f64::max);
+    let y_max = y_axis_upper as f64;
 
     let datasets = vec![
         Dataset::default()
@@ -77,10 +78,14 @@ fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: 
         )
         .y_axis(Axis::default().bounds([0.0, y_max]).labels([
             Line::from("0"),
-            Line::from(format_bytes(latest_value.max(1))),
+            Line::from(format_bytes(y_axis_upper)),
         ]));
 
     frame.render_widget(chart, area);
+}
+
+fn chart_y_upper_bound(total_bytes: u64) -> u64 {
+    total_bytes.max(1)
 }
 
 fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -215,4 +220,19 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     .column_spacing(1);
 
     frame.render_widget(table, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chart_y_upper_bound;
+
+    #[test]
+    fn chart_upper_bound_uses_total_when_non_zero() {
+        assert_eq!(chart_y_upper_bound(1024), 1024);
+    }
+
+    #[test]
+    fn chart_upper_bound_falls_back_to_one_for_zero() {
+        assert_eq!(chart_y_upper_bound(0), 1);
+    }
 }
