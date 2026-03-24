@@ -51,7 +51,7 @@ impl SortState {
     /// Toggles the sort direction between ascending and descending.
     pub fn toggle(&mut self) {
         self.direction = match self.direction {
-            SortDirection::Ascending  => SortDirection::Descending,
+            SortDirection::Ascending => SortDirection::Descending,
             SortDirection::Descending => SortDirection::Ascending,
         };
     }

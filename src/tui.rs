@@ -91,7 +91,6 @@ fn chart_y_upper_bound(total_bytes: u64) -> u64 {
 
 fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let system = &app.snapshot.system;
-    let sort_dir = if app.sort_ascending { "asc" } else { "desc" };
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -130,12 +129,11 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "count {} / agg-rss {} / agg-swap {} / sort {:?} {} / selected {} / age {}s",
+                "count {} / agg-rss {} / agg-swap {} / sort {} / selected {} / age {}s",
                 system.process_count,
                 format_bytes(system.total_process_rss),
                 format_bytes(system.total_process_swap),
-                app.sort_key,
-                sort_dir,
+                app.sort_state.label(),
                 app.selected_pid()
                     .map_or("-".to_string(), |pid| pid.to_string()),
                 app.snapshot.captured_at.elapsed().as_secs(),
