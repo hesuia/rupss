@@ -166,7 +166,7 @@ impl SystemCollector for ProcfsCollector {
     }
 
     fn collect_visible_memory_details(&self, pids: &[i32]) -> HashMap<i32, DetailedMemorySample> {
-        let mut details = HashMap::new();
+        let mut details = HashMap::with_capacity(pids.len());
 
         for pid in pids {
             let Ok(process) = Process::new(*pid) else {
