@@ -76,10 +76,11 @@ fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: 
                 .bounds([0.0, x_max])
                 .labels([Line::from("-3m"), Line::from("now")]),
         )
-        .y_axis(Axis::default().bounds([0.0, y_max]).labels([
-            Line::from("0"),
-            Line::from(format_bytes(y_axis_upper)),
-        ]));
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, y_max])
+                .labels([Line::from("0"), Line::from(format_bytes(y_axis_upper))]),
+        );
 
     frame.render_widget(chart, area);
 }
@@ -156,6 +157,7 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
+    app.set_process_table_area(area);
     // The viewport height decides which rows are considered visible and therefore
     // which PIDs are eligible for `smaps_rollup` collection.
     app.set_viewport_rows(area.height.saturating_sub(3) as usize);
@@ -214,7 +216,7 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     .header(header)
     .block(
         Block::default()
-            .title("Processes  q:quit  arrows:move  PgUp/PgDn:page  r/s/p/c:sort")
+            .title("Processes  q:quit  arrows/jk:move  click:select  PgUp/PgDn:page  r/s/p/c:sort")
             .borders(Borders::ALL),
     )
     .column_spacing(1);

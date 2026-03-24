@@ -2,13 +2,17 @@ use crate::collector::{CpuSample, ProcfsCollector, SystemCollector};
 use crate::history::HistoryBuffer;
 use crate::snapshot::{HistoryPoint, ProcessRow, Snapshot, SortKey, SystemSummary};
 use crate::tui;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+    MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
@@ -44,6 +48,7 @@ pub struct AppState {
     swap_history: HistoryBuffer<u64>,
     previous_cpu: HashMap<i32, CpuSample>,
     collector: ProcfsCollector,
+    process_table_area: Option<Rect>,
     /// Most recent collection error kept for on-screen display.
     pub last_error: Option<String>,
 }
@@ -69,14 +74,17 @@ fn run_app(terminal: &mut CrosstermTerminal) -> io::Result<()> {
         terminal.draw(|frame| tui::render(frame, &mut app))?;
 
         if event::poll(EVENT_POLL)? {
-            let Event::Key(key) = event::read()? else {
-                continue;
-            };
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            if app.handle_key(key.code) {
-                return Ok(());
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    if app.handle_key(key.code) {
+                        return Ok(());
+                    }
+                }
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
+                _ => {}
             }
         }
 
@@ -119,6 +127,7 @@ impl AppState {
             swap_history: HistoryBuffer::new(HISTORY_CAPACITY),
             previous_cpu: HashMap::new(),
             collector,
+            process_table_area: None,
             last_error: None,
         }
     }
@@ -141,7 +150,7 @@ impl AppState {
                 self.previous_cpu = next_cpu;
                 sort_processes(self.sort_key, &mut snapshot.processes);
                 self.snapshot = snapshot;
-                self.restore_selection(selected_pid);
+                self.restore_selection(selected_pid, false);
                 self.push_history(history_point);
                 self.populate_visible_details();
                 self.last_error = None;
@@ -157,7 +166,7 @@ impl AppState {
     /// Updates the number of table rows that fit on screen.
     pub fn set_viewport_rows(&mut self, rows: usize) {
         self.viewport_rows = rows.max(1);
-        self.ensure_visible();
+        self.clamp_scroll_offset();
     }
 
     /// Returns the rows currently visible in the process table viewport.
@@ -167,6 +176,11 @@ impl AppState {
             .saturating_add(self.viewport_rows)
             .min(self.snapshot.processes.len());
         &self.snapshot.processes[self.scroll_offset.min(end)..end]
+    }
+
+    /// Stores the process table area from the most recent frame.
+    pub fn set_process_table_area(&mut self, area: Rect) {
+        self.process_table_area = Some(area);
     }
 
     /// Resolves a UID into a cached display name or falls back to the numeric UID.
@@ -202,11 +216,11 @@ impl AppState {
     pub fn handle_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Char('q') => true,
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 self.move_selection(-1);
                 false
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 self.move_selection(1);
                 false
             }
@@ -256,10 +270,26 @@ impl AppState {
         }
     }
 
+    /// Applies one mouse action.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.select_process_at(mouse.column, mouse.row);
+            }
+            MouseEventKind::ScrollUp => {
+                self.scroll_with_wheel(mouse.column, mouse.row, -1);
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_with_wheel(mouse.column, mouse.row, 1);
+            }
+            _ => {}
+        }
+    }
+
     fn resort(&mut self) {
         let selected_pid = self.selected_pid();
         sort_processes(self.sort_key, &mut self.snapshot.processes);
-        self.restore_selection(selected_pid);
+        self.restore_selection(selected_pid, true);
         self.populate_visible_details();
     }
 
@@ -275,6 +305,63 @@ impl AppState {
         self.populate_visible_details();
     }
 
+    fn select_process_at(&mut self, column: u16, row: u16) {
+        let Some(area) = self.process_table_area else {
+            return;
+        };
+        if area.width < 3 || area.height < 4 {
+            return;
+        }
+
+        // Require clicks in the table body (inside borders, excluding header).
+        let left = area.x.saturating_add(1);
+        let right = area.x.saturating_add(area.width.saturating_sub(2));
+        if column < left || column > right {
+            return;
+        }
+        let first_data_row = area.y.saturating_add(2);
+        let last_data_row = area.y.saturating_add(area.height.saturating_sub(2));
+        if row < first_data_row || row > last_data_row {
+            return;
+        }
+
+        let data_row = row.saturating_sub(first_data_row) as usize;
+        let visible_len = self.visible_processes().len();
+        if data_row >= visible_len {
+            return;
+        }
+
+        self.selected = self.scroll_offset.saturating_add(data_row);
+        self.ensure_visible();
+        self.populate_visible_details();
+    }
+
+    fn scroll_with_wheel(&mut self, column: u16, row: u16, delta: isize) {
+        if !self.is_inside_process_table(column, row) {
+            return;
+        }
+        if self.snapshot.processes.is_empty() {
+            return;
+        }
+
+        if delta < 0 {
+            self.scroll_offset = self.scroll_offset.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.scroll_offset = self.scroll_offset.saturating_add(delta as usize);
+        }
+        self.clamp_scroll_offset();
+        self.populate_visible_details();
+    }
+
+    fn is_inside_process_table(&self, column: u16, row: u16) -> bool {
+        let Some(area) = self.process_table_area else {
+            return false;
+        };
+        let right = area.x.saturating_add(area.width.saturating_sub(1));
+        let bottom = area.y.saturating_add(area.height.saturating_sub(1));
+        column >= area.x && column <= right && row >= area.y && row <= bottom
+    }
+
     fn ensure_visible(&mut self) {
         // Keep the selected row inside the current viewport after movement or resize.
         if self.selected < self.scroll_offset {
@@ -287,6 +374,16 @@ impl AppState {
                 .selected
                 .saturating_sub(self.viewport_rows.saturating_sub(1));
         }
+        self.clamp_scroll_offset();
+    }
+
+    fn clamp_scroll_offset(&mut self) {
+        let max_offset = self
+            .snapshot
+            .processes
+            .len()
+            .saturating_sub(self.viewport_rows.max(1));
+        self.scroll_offset = self.scroll_offset.min(max_offset);
     }
 
     fn visible_pids(&self) -> Vec<i32> {
@@ -315,7 +412,7 @@ impl AppState {
         }
     }
 
-    fn restore_selection(&mut self, selected_pid: Option<i32>) {
+    fn restore_selection(&mut self, selected_pid: Option<i32>, ensure_visible: bool) {
         if self.snapshot.processes.is_empty() {
             self.selected = 0;
             self.scroll_offset = 0;
@@ -332,7 +429,11 @@ impl AppState {
             })
             .unwrap_or(0)
             .min(self.snapshot.processes.len().saturating_sub(1));
-        self.ensure_visible();
+        if ensure_visible {
+            self.ensure_visible();
+        } else {
+            self.clamp_scroll_offset();
+        }
     }
 
     fn push_history(&mut self, point: HistoryPoint) {
@@ -410,7 +511,7 @@ fn load_username_cache() -> HashMap<u32, String> {
 fn setup_terminal() -> io::Result<CrosstermTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend)
 }
@@ -418,16 +519,23 @@ fn setup_terminal() -> io::Result<CrosstermTerminal> {
 /// Restores the terminal back to the normal shell state.
 fn restore_terminal(terminal: &mut CrosstermTerminal) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_process_rows, history_points};
+    use super::{AppState, compare_process_rows, history_points};
+    use crate::collector::ProcfsCollector;
     use crate::history::HistoryBuffer;
     use crate::snapshot::{ProcessRow, SortKey};
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
 
     fn sample_row(pid: i32) -> ProcessRow {
         ProcessRow {
@@ -459,5 +567,215 @@ mod tests {
     fn sort_prefers_highest_metric() {
         let ordering = compare_process_rows(SortKey::Cpu, &sample_row(10), &sample_row(20));
         assert_eq!(ordering, std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn j_and_k_move_selection() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(1), sample_row(2), sample_row(3)];
+        app.set_viewport_rows(3);
+        app.selected = 1;
+
+        assert!(!app.handle_key(KeyCode::Char('j')));
+        assert_eq!(app.selected, 2);
+
+        assert!(!app.handle_key(KeyCode::Char('j')));
+        assert_eq!(app.selected, 2);
+
+        assert!(!app.handle_key(KeyCode::Char('k')));
+        assert_eq!(app.selected, 1);
+
+        assert!(!app.handle_key(KeyCode::Char('k')));
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn left_click_selects_visible_row() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30)];
+        app.set_viewport_rows(3);
+        app.set_process_table_area(Rect::new(0, 0, 40, 8));
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn click_outside_data_rows_does_not_change_selection() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30)];
+        app.set_viewport_rows(3);
+        app.set_process_table_area(Rect::new(0, 0, 40, 8));
+        app.selected = 2;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn wheel_scroll_up_changes_offset_not_selected() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.set_viewport_rows(2);
+        app.set_process_table_area(Rect::new(0, 0, 40, 8));
+        app.selected = 3;
+        app.scroll_offset = 2;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.selected, 3);
+    }
+
+    #[test]
+    fn wheel_scroll_down_changes_offset_not_selected() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.set_viewport_rows(2);
+        app.set_process_table_area(Rect::new(0, 0, 40, 8));
+        app.selected = 0;
+        app.scroll_offset = 0;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn wheel_scroll_clamps_at_bounds() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.set_viewport_rows(2);
+        app.set_process_table_area(Rect::new(0, 0, 40, 8));
+        app.scroll_offset = 0;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.scroll_offset, 0);
+
+        app.scroll_offset = 2;
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.scroll_offset, 2);
+    }
+
+    #[test]
+    fn wheel_outside_table_does_not_change_state() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.set_viewport_rows(2);
+        app.set_process_table_area(Rect::new(0, 0, 40, 8));
+        app.selected = 2;
+        app.scroll_offset = 1;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 41,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn wheel_on_table_border_is_handled() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30), sample_row(40)];
+        app.set_viewport_rows(2);
+        app.set_process_table_area(Rect::new(5, 2, 40, 8));
+        app.scroll_offset = 0;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.scroll_offset, 1);
+    }
+
+    #[test]
+    fn set_viewport_rows_does_not_force_selected_visible() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![
+            sample_row(10),
+            sample_row(20),
+            sample_row(30),
+            sample_row(40),
+            sample_row(50),
+        ];
+        app.selected = 0;
+        app.scroll_offset = 2;
+
+        app.set_viewport_rows(2);
+
+        assert_eq!(app.scroll_offset, 2);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn restore_selection_without_ensure_visible_keeps_scroll_offset() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![
+            sample_row(10),
+            sample_row(20),
+            sample_row(30),
+            sample_row(40),
+            sample_row(50),
+        ];
+        app.set_viewport_rows(2);
+        app.selected = 0;
+        app.scroll_offset = 3;
+
+        app.restore_selection(Some(10), false);
+
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.scroll_offset, 3);
     }
 }
