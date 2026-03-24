@@ -45,6 +45,8 @@ pub struct AppState {
     pub snapshot: Snapshot,
     /// Active sort key for the process table.
     pub sort_key: SortKey,
+    /// Sort direction for the process table.
+    pub sort_ascending: bool,
     /// Absolute index of the selected row in `snapshot.processes`.
     pub selected: usize,
     /// Absolute start index of the visible table window.
@@ -126,6 +128,7 @@ impl AppState {
                 processes: Vec::new(),
             },
             sort_key: SortKey::Rss,
+            sort_ascending: false,
             selected: 0,
             scroll_offset: 0,
             viewport_rows: 20,
@@ -155,7 +158,12 @@ impl AppState {
         {
             Ok((mut snapshot, next_cpu, history_point)) => {
                 self.previous_cpu = next_cpu;
-                sort_processes(self.sort_key, &mut snapshot.processes);
+                sort_processes(
+                    self.sort_key,
+                    self.sort_ascending,
+                    &self.username_cache,
+                    &mut snapshot.processes,
+                );
                 self.snapshot = snapshot;
                 self.restore_selection(selected_pid, false);
                 self.push_history(history_point);
@@ -254,16 +262,32 @@ impl AppState {
                 self.populate_visible_details();
                 KeyAction::Continue
             }
+            KeyCode::Char('i') => {
+                self.resort(SortKey::Pid);
+                KeyAction::Continue
+            }
+            KeyCode::Char('p') => {
+                self.resort(SortKey::Ppid);
+                KeyAction::Continue
+            }
+            KeyCode::Char('o') => {
+                self.resort(SortKey::Owner);
+                KeyAction::Continue
+            }
+            KeyCode::Char('n') => {
+                self.resort(SortKey::Name);
+                KeyAction::Continue
+            }
+            KeyCode::Char('m') => {
+                self.resort(SortKey::Command);
+                KeyAction::Continue
+            }
             KeyCode::Char('r') => {
                 self.resort(SortKey::Rss);
                 KeyAction::Continue
             }
             KeyCode::Char('s') => {
                 self.resort(SortKey::Swap);
-                KeyAction::Continue
-            }
-            KeyCode::Char('p') => {
-                self.resort(SortKey::Pss);
                 KeyAction::Continue
             }
             KeyCode::Char('c') => {
@@ -291,9 +315,19 @@ impl AppState {
     }
 
     fn resort(&mut self, sort_key: SortKey) {
-        self.sort_key = sort_key;
+        if self.sort_key == sort_key {
+            self.sort_ascending = !self.sort_ascending;
+        } else {
+            self.sort_ascending = default_sort_ascending(sort_key);
+            self.sort_key = sort_key;
+        }
         let selected_pid = self.selected_pid();
-        sort_processes(sort_key, &mut self.snapshot.processes);
+        sort_processes(
+            sort_key,
+            self.sort_ascending,
+            &self.username_cache,
+            &mut self.snapshot.processes,
+        );
         self.restore_selection(selected_pid, true);
         self.populate_visible_details();
     }
@@ -450,18 +484,38 @@ impl AppState {
 /// Compares two rows using the active sort key and PID as a stable tie-breaker.
 ///
 /// A deterministic tie-breaker keeps the table stable across refreshes.
-fn compare_process_rows(sort_key: SortKey, left: &ProcessRow, right: &ProcessRow) -> Ordering {
+fn compare_process_rows(
+    sort_key: SortKey,
+    sort_ascending: bool,
+    username_cache: &HashMap<u32, String>,
+    left: &ProcessRow,
+    right: &ProcessRow,
+) -> Ordering {
     let primary = match sort_key {
-        SortKey::Rss => right.rss_bytes.cmp(&left.rss_bytes),
-        SortKey::Swap => right.visible_swap_bytes().cmp(&left.visible_swap_bytes()),
-        SortKey::Pss => right
-            .pss_bytes
-            .unwrap_or(0)
-            .cmp(&left.pss_bytes.unwrap_or(0)),
-        SortKey::Cpu => right
+        SortKey::Pid => left.pid.cmp(&right.pid),
+        SortKey::Ppid => left.ppid.cmp(&right.ppid),
+        SortKey::Owner => {
+            let left_owner = owner_display_name(username_cache, left.owner_uid);
+            let right_owner = owner_display_name(username_cache, right.owner_uid);
+            left_owner.cmp(&right_owner)
+        }
+        SortKey::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
+        SortKey::Command => left
+            .command
+            .to_lowercase()
+            .cmp(&right.command.to_lowercase()),
+        SortKey::Rss => left.rss_bytes.cmp(&right.rss_bytes),
+        SortKey::Swap => left.visible_swap_bytes().cmp(&right.visible_swap_bytes()),
+        SortKey::Cpu => left
             .cpu_percent
-            .partial_cmp(&left.cpu_percent)
+            .partial_cmp(&right.cpu_percent)
             .unwrap_or(Ordering::Equal),
+    };
+
+    let primary = if sort_ascending {
+        primary
+    } else {
+        primary.reverse()
     };
 
     primary.then_with(|| left.pid.cmp(&right.pid))
@@ -470,8 +524,29 @@ fn compare_process_rows(sort_key: SortKey, left: &ProcessRow, right: &ProcessRow
 /// Sorts the process list in place using the current table policy.
 ///
 /// Sorting is done after each refresh and whenever the user changes sort key.
-fn sort_processes(sort_key: SortKey, processes: &mut [ProcessRow]) {
-    processes.sort_by(|left, right| compare_process_rows(sort_key, left, right));
+fn sort_processes(
+    sort_key: SortKey,
+    sort_ascending: bool,
+    username_cache: &HashMap<u32, String>,
+    processes: &mut [ProcessRow],
+) {
+    processes.sort_by(|left, right| {
+        compare_process_rows(sort_key, sort_ascending, username_cache, left, right)
+    });
+}
+
+fn owner_display_name(username_cache: &HashMap<u32, String>, uid: u32) -> String {
+    username_cache
+        .get(&uid)
+        .map(|name| name.to_lowercase())
+        .unwrap_or_else(|| uid.to_string())
+}
+
+fn default_sort_ascending(sort_key: SortKey) -> bool {
+    matches!(
+        sort_key,
+        SortKey::Pid | SortKey::Ppid | SortKey::Owner | SortKey::Name | SortKey::Command
+    )
 }
 
 /// Converts the fixed-size history buffer into chart coordinates.
@@ -541,6 +616,7 @@ mod tests {
     use crate::snapshot::{ProcessRow, SortKey};
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
+    use std::collections::HashMap;
 
     fn sample_row(pid: i32) -> ProcessRow {
         ProcessRow {
@@ -570,8 +646,67 @@ mod tests {
 
     #[test]
     fn sort_prefers_highest_metric() {
-        let ordering = compare_process_rows(SortKey::Cpu, &sample_row(10), &sample_row(20));
+        let ordering = compare_process_rows(
+            SortKey::Cpu,
+            false,
+            &HashMap::new(),
+            &sample_row(10),
+            &sample_row(20),
+        );
         assert_eq!(ordering, std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn sort_by_pid_is_ascending() {
+        let ordering = compare_process_rows(
+            SortKey::Pid,
+            true,
+            &HashMap::new(),
+            &sample_row(10),
+            &sample_row(20),
+        );
+        assert_eq!(ordering, std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn sort_by_owner_is_case_insensitive() {
+        let mut owners = HashMap::new();
+        owners.insert(1000, "Alice".to_string());
+        owners.insert(1001, "bob".to_string());
+
+        let mut left = sample_row(10);
+        left.owner_uid = 1000;
+        let mut right = sample_row(20);
+        right.owner_uid = 1001;
+
+        let ordering = compare_process_rows(SortKey::Owner, true, &owners, &left, &right);
+        assert_eq!(ordering, std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn sort_direction_toggles_on_same_key() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(1), sample_row(2)];
+        app.sort_key = SortKey::Rss;
+        app.sort_ascending = false;
+
+        app.handle_key(KeyCode::Char('r'));
+        assert!(app.sort_ascending);
+
+        app.handle_key(KeyCode::Char('r'));
+        assert!(!app.sort_ascending);
+    }
+
+    #[test]
+    fn sort_direction_resets_on_new_key() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.snapshot.processes = vec![sample_row(1), sample_row(2)];
+        app.sort_key = SortKey::Rss;
+        app.sort_ascending = false;
+
+        app.handle_key(KeyCode::Char('i'));
+        assert_eq!(app.sort_key, SortKey::Pid);
+        assert!(app.sort_ascending);
     }
 
     #[test]

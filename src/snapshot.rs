@@ -1,16 +1,66 @@
+use compact_str::{CompactString, format_compact};
 use std::time::Instant;
+use strum::AsRefStr;
 
 /// Sort keys supported by the process table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum SortKey {
+    /// Sort by process ID.
+    Pid,
+    /// Sort by parent process ID.
+    Ppid,
+    /// Sort by owner name.
+    Owner,
+    /// Sort by short process name.
+    Name,
+    /// Sort by full command line.
+    Command,
     /// Sort by resident set size.
     Rss,
     /// Sort by swap usage.
     Swap,
-    /// Sort by proportional set size.
-    Pss,
     /// Sort by calculated CPU percentage.
     Cpu,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+pub enum SortDirection {
+    /// Sort in ascending order (e.g. lowest to highest).
+    #[strum(serialize = "asc")]
+    Ascending,
+    /// Sort in descending order (e.g. highest to lowest).
+    #[strum(serialize = "desc")]
+    Descending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortState {
+    /// The key currently used for sorting the process table.
+    pub key: SortKey,
+    /// The direction of sorting (ascending or descending).
+    pub direction: SortDirection,
+}
+
+impl SortState {
+    /// Creates a new `SortState` with the given key and default descending direction.
+    pub fn new(key: SortKey, direction: SortDirection) -> Self {
+        Self { key, direction }
+    }
+
+    /// Toggles the sort direction between ascending and descending.
+    pub fn toggle(&mut self) {
+        self.direction = match self.direction {
+            SortDirection::Ascending  => SortDirection::Descending,
+            SortDirection::Descending => SortDirection::Ascending,
+        };
+    }
+
+    pub fn label(&self) -> CompactString {
+        let k = self.key.as_ref();
+        let d = self.direction.as_ref();
+        format_compact!("{k} {d}")
+    }
 }
 
 /// One history sample used by the top charts.
