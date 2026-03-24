@@ -21,8 +21,23 @@ impl<T> HistoryBuffer<T> {
         self.items.push_back(item);
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
+}
+
+impl<'a, T> IntoIterator for &'a HistoryBuffer<T> {
+    type Item = &'a T;
+    type IntoIter = std::collections::vec_deque::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
         self.items.iter()
+    }
+}
+
+impl<T> IntoIterator for HistoryBuffer<T> {
+    type Item = T;
+    type IntoIter = std::collections::vec_deque::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.into_iter()
     }
 }
 
@@ -38,7 +53,7 @@ mod tests {
         history.push(3);
         history.push(4);
 
-        let items: Vec<_> = history.iter().copied().collect();
+        let items: Vec<_> = (&history).into_iter().copied().collect();
         assert_eq!(items, vec![2, 3, 4]);
     }
 }

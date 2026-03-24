@@ -321,7 +321,7 @@ fn sort_processes(sort_key: SortKey, processes: &mut [ProcessRow]) {
 
 fn history_points(history: &HistoryBuffer<u64>) -> Vec<(f64, f64)> {
     history
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(idx, value)| (idx as f64, *value as f64))
         .collect()
