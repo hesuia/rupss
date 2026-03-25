@@ -27,11 +27,10 @@ pub enum SortKey {
 impl SortKey {
     /// Returns the default sort direction for this key.
     pub fn default_direction(&self) -> SortDirection {
+        use SortKey::*;
         match self {
-            SortKey::Pid | SortKey::Ppid | SortKey::Owner | SortKey::Name | SortKey::Command => {
-                SortDirection::Ascending
-            }
-            _ => SortDirection::Descending,
+            Pid | Ppid | Owner | Name | Command => SortDirection::Ascending,
+            Rss | Swap | Cpu => SortDirection::Descending,
         }
     }
 }
