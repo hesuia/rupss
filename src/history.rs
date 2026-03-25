@@ -7,7 +7,7 @@ use std::collections::{VecDeque, vec_deque};
 /// - Iteration yields items from oldest to newest.
 ///
 /// This keeps memory usage stable while preserving the latest samples for charts.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryBuffer<T> {
     capacity: usize,
     items: VecDeque<T>,
@@ -31,6 +31,41 @@ impl<T> HistoryBuffer<T> {
         }
         self.items.push_back(item);
     }
+
+    /// Returns the number of items currently stored in the history.
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Returns `true` if the history is empty.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Returns the maximum number of items the history can hold.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Clears all items from the history, leaving it empty but retaining capacity.
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    /// Returns an iterator over the items from oldest to newest without consuming the buffer.
+    pub fn iter(&self) -> vec_deque::Iter<'_, T> {
+        self.items.iter()
+    }
+
+    /// Returns a reference to the oldest item in the history, or `None` if empty.
+    pub fn front(&self) -> Option<&T> {
+        self.items.front()
+    }
+
+    /// Returns a reference to the newest item in the history, or `None` if empty.
+    pub fn back(&self) -> Option<&T> {
+        self.items.back()
+    }
 }
 
 impl<'a, T> IntoIterator for &'a HistoryBuffer<T> {
@@ -50,6 +85,16 @@ impl<T> IntoIterator for HistoryBuffer<T> {
     /// Consumes the buffer and yields items from oldest to newest.
     fn into_iter(self) -> Self::IntoIter {
         self.items.into_iter()
+    }
+}
+impl<T> Extend<T> for HistoryBuffer<T> {
+    /// Extends the history with items from an iterator.
+    ///
+    /// If the total number of items exceeds capacity, the oldest items are dropped.
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for item in iter {
+            self.push(item);
+        }
     }
 }
 
