@@ -119,7 +119,7 @@ fn run_app(terminal: &mut CrosstermTerminal) -> io::Result<()> {
         if event::poll(EVENT_POLL)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.kind == KeyEventKind::Press {
+                    if matches!(key.kind, KeyEventKind::Press) {
                         match app.handle_key(key.code) {
                             KeyAction::Quit => return Ok(()),
                             KeyAction::Continue => {}
