@@ -561,20 +561,13 @@ impl AppState {
         if pids.is_empty() {
             return;
         }
-
         let details = self.collector.collect_visible_memory_details(&pids);
-        // Clear stale detail values first so hidden rows do not keep old `smaps_rollup` data.
-        for row in &mut self.snapshot.processes {
-            row.uss_bytes = None;
-            row.pss_bytes = None;
-            row.detailed_swap_bytes = None;
-        }
-        for row in &mut self.snapshot.processes {
-            if let Some(detail) = details.get(&row.pid) {
-                row.uss_bytes = detail.uss_bytes;
-                row.pss_bytes = detail.pss_bytes;
-                row.detailed_swap_bytes = detail.swap_bytes;
-            }
+
+        for row in self.snapshot.processes.iter_mut() {
+            let detail = details.get(&row.pid);
+            row.uss_bytes = detail.and_then(|d| d.uss_bytes);
+            row.pss_bytes = detail.and_then(|d| d.pss_bytes);
+            row.detailed_swap_bytes = detail.and_then(|d| d.swap_bytes);
         }
     }
 
