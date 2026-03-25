@@ -1,10 +1,14 @@
-use crate::format::truncate_owned;
-use crate::snapshot::{HistoryPoint, ProcessRow, Snapshot, SystemSummary};
-use procfs::prelude::Current;
-use procfs::process::{Process, all_processes};
-use procfs::{Meminfo, page_size, ticks_per_second};
-use std::collections::HashMap;
-use std::time::Instant;
+use crate::{
+    format::truncate_owned,
+    snapshot::{HistoryPoint, ProcessRow, Snapshot, SystemSummary},
+};
+use procfs::{
+    Meminfo, page_size,
+    prelude::Current,
+    process::{Process, all_processes},
+    ticks_per_second,
+};
+use std::{collections::HashMap, time::Instant};
 
 const MAX_NAME_LEN: usize = 32;
 const MAX_COMMAND_LEN: usize = 96;

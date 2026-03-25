@@ -1,25 +1,27 @@
-use crate::collector::{CpuSample, ProcfsCollector, SystemCollector};
-use crate::history::HistoryBuffer;
-use crate::snapshot::{
-    HistoryPoint, ProcessRow, Snapshot, SortDirection, SortKey, SortState, SystemSummary,
+use crate::{
+    collector::{CpuSample, ProcfsCollector, SystemCollector},
+    history::HistoryBuffer,
+    snapshot::{
+        HistoryPoint, ProcessRow, Snapshot, SortDirection, SortKey, SortState, SystemSummary,
+    },
+    tui,
 };
-use crate::tui;
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
-    MouseEvent, MouseEventKind,
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEvent, MouseEventKind,
+    },
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    fs,
+    io::{self, Stdout},
+    time::{Duration, Instant},
 };
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io::{self, Stdout};
-use std::time::{Duration, Instant};
 
 const HISTORY_CAPACITY: usize = 180;
 const TICK_RATE: Duration = Duration::from_secs(1);

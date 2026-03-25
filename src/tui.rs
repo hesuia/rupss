@@ -1,11 +1,15 @@
-use crate::app::{AppState, ViewMode, process_table_column_widths};
-use crate::format::{format_bytes, format_option_bytes, format_percent};
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::symbols;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Axis, Block, Borders, Cell, Chart, Dataset, Paragraph, Row, Table};
+use crate::{
+    app::{AppState, ViewMode, process_table_column_widths},
+    format::{format_bytes, format_option_bytes, format_percent},
+};
+use ratatui::{
+    Frame,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    symbols,
+    text::{Line, Span},
+    widgets::{Axis, Block, Borders, Cell, Chart, Dataset, Paragraph, Row, Table},
+};
 
 /// Draws the complete application frame.
 ///
