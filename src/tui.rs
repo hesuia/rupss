@@ -138,10 +138,7 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                 format_bytes(system.total_process_rss),
                 format_bytes(system.total_process_swap),
                 app.sort_state.label(),
-                match app.view_mode {
-                    ViewMode::Flat => "flat",
-                    ViewMode::Tree => "tree",
-                },
+                app.view_mode.as_ref(),
                 app.selected_pid()
                     .map_or("-".to_string(), |pid| pid.to_string()),
                 app.snapshot.captured_at.elapsed().as_millis()

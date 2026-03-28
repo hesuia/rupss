@@ -1,9 +1,9 @@
 use compact_str::{CompactString, format_compact};
 use std::time::Instant;
-use strum::AsRefStr;
+use strum::{AsRefStr, IntoStaticStr};
 
 /// Sort keys supported by the process table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum SortKey {
     /// Sort by process ID.
@@ -35,7 +35,7 @@ impl SortKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, IntoStaticStr)]
 pub enum SortDirection {
     /// Sort in ascending order (e.g. lowest to highest).
     #[strum(serialize = "asc")]
@@ -44,6 +44,17 @@ pub enum SortDirection {
     #[strum(serialize = "desc")]
     Descending,
 }
+
+impl SortDirection {
+    /// Toggles the sort direction between ascending and descending.
+    pub fn toggle(self) -> Self {
+        match self {
+            SortDirection::Ascending => SortDirection::Descending,
+            SortDirection::Descending => SortDirection::Ascending,
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SortState {
@@ -59,19 +70,19 @@ impl SortState {
         Self { key, direction }
     }
 
+    /// Creates a new `SortState` with the given key and its default direction.
+    pub fn default_for_key(key: SortKey) -> Self {
+        Self::new(key, key.default_direction())
+    }
+
     /// Toggles the sort direction between ascending and descending.
-    pub fn toggle(&mut self) {
-        self.direction = match self.direction {
-            SortDirection::Ascending => SortDirection::Descending,
-            SortDirection::Descending => SortDirection::Ascending,
-        };
+    pub fn toggle_direction(&mut self) {
+        self.direction = self.direction.toggle();
     }
 
     /// Returns a human-readable label for the current sort state, combining the key and direction.
     pub fn label(&self) -> CompactString {
-        let k = self.key.as_ref();
-        let d = self.direction.as_ref();
-        format_compact!("{k} {d}")
+        format_compact!("{} {}", self.key.as_ref(), self.direction.as_ref())
     }
 }
 

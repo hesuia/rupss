@@ -16,12 +16,14 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
     fs,
     io::{self, Stdout},
     time::{Duration, Instant},
 };
+use strum::{AsRefStr, IntoStaticStr};
 
 const HISTORY_CAPACITY: usize = 180;
 const TICK_RATE: Duration = Duration::from_secs(1);
@@ -40,17 +42,29 @@ pub(crate) fn process_table_column_widths(view_mode: ViewMode) -> [u16; 11] {
 }
 
 /// Result of handling one key input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum KeyAction {
     Continue,
     Quit,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum ViewMode {
     Flat,
     Tree,
 }
+
+impl ViewMode {
+    pub fn toggle(self) -> Self {
+        match self {
+            ViewMode::Flat => ViewMode::Tree,
+            ViewMode::Tree => ViewMode::Flat,
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TreeRow {
@@ -425,9 +439,9 @@ impl AppState {
 
     fn resort(&mut self, sort_key: SortKey) {
         if self.sort_state.key == sort_key {
-            self.sort_state.toggle();
+            self.sort_state.toggle_direction();
         } else {
-            self.sort_state = SortState::new(sort_key, sort_key.default_direction());
+            self.sort_state = SortState::default_for_key(sort_key);
         }
         let selected_pid = self.selected_pid();
         sort_processes(
@@ -566,10 +580,11 @@ impl AppState {
         let details = self.collector.collect_visible_memory_details(&pids);
 
         for row in self.snapshot.processes.iter_mut() {
-            let detail = details.get(&row.pid);
-            row.uss_bytes = detail.and_then(|d| d.uss_bytes);
-            row.pss_bytes = detail.and_then(|d| d.pss_bytes);
-            row.detailed_swap_bytes = detail.and_then(|d| d.swap_bytes);
+            if let Some(detail) = details.get(&row.pid) {
+                row.uss_bytes = detail.uss_bytes;
+                row.pss_bytes = detail.pss_bytes;
+                row.detailed_swap_bytes = detail.swap_bytes;
+            }
         }
     }
 
@@ -606,10 +621,7 @@ impl AppState {
     }
 
     fn toggle_view_mode(&mut self) {
-        self.view_mode = match self.view_mode {
-            ViewMode::Flat => ViewMode::Tree,
-            ViewMode::Tree => ViewMode::Flat,
-        };
+        self.view_mode = self.view_mode.toggle();
         if self.view_mode == ViewMode::Tree {
             self.ensure_tree_selection_visible();
         }
@@ -858,6 +870,12 @@ fn compare_process_rows(
     left: &ProcessRow,
     right: &ProcessRow,
 ) -> Ordering {
+    fn owner_display_name<'a>(username_cache: &'a HashMap<u32, String>, uid: u32) -> Cow<'a, str> {
+        username_cache
+            .get(&uid)
+            .map(|name| Cow::Borrowed(name.as_str()))
+            .unwrap_or_else(|| Cow::Owned(format!("uid:{}", uid)))
+    }
     let primary = match sort_state.key {
         SortKey::Pid => left.pid.cmp(&right.pid),
         SortKey::Ppid => left.ppid.cmp(&right.ppid),
@@ -896,13 +914,6 @@ fn sort_processes(
     processes: &mut [ProcessRow],
 ) {
     processes.sort_by(|left, right| compare_process_rows(sort_state, username_cache, left, right));
-}
-
-fn owner_display_name(username_cache: &HashMap<u32, String>, uid: u32) -> String {
-    username_cache
-        .get(&uid)
-        .map(|name| name.to_lowercase())
-        .unwrap_or_else(|| uid.to_string())
 }
 
 /// Converts the fixed-size history buffer into chart coordinates.
