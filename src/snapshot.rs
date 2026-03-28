@@ -55,7 +55,6 @@ impl SortDirection {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SortState {
     /// The key currently used for sorting the process table.
@@ -71,13 +70,24 @@ impl SortState {
     }
 
     /// Creates a new `SortState` with the given key and its default direction.
-    pub fn default_for_key(key: SortKey) -> Self {
+    #[allow(dead_code)]
+    fn default_for_key(key: SortKey) -> Self {
         Self::new(key, key.default_direction())
     }
 
     /// Toggles the sort direction between ascending and descending.
     pub fn toggle_direction(&mut self) {
         self.direction = self.direction.toggle();
+    }
+
+    /// Toggles the sort key. If the new key is the same as the current key, also toggles the direction.
+    pub fn toggle_key(&mut self, new_key: SortKey) {
+        if self.key == new_key {
+            self.toggle_direction();
+        } else {
+            self.key = new_key;
+            self.direction = new_key.default_direction();
+        }
     }
 
     /// Returns a human-readable label for the current sort state, combining the key and direction.
