@@ -42,8 +42,7 @@ pub(crate) fn process_table_column_widths(view_mode: ViewMode) -> [u16; 11] {
 }
 
 /// Result of handling one key input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, IntoStaticStr)]
-#[strum(serialize_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAction {
     Continue,
     Quit,
@@ -64,7 +63,6 @@ impl ViewMode {
         }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TreeRow {
@@ -438,11 +436,7 @@ impl AppState {
     }
 
     fn resort(&mut self, sort_key: SortKey) {
-        if self.sort_state.key == sort_key {
-            self.sort_state.toggle_direction();
-        } else {
-            self.sort_state = SortState::default_for_key(sort_key);
-        }
+        self.sort_state.toggle_key(sort_key);
         let selected_pid = self.selected_pid();
         sort_processes(
             self.sort_state,
@@ -722,7 +716,7 @@ impl AppState {
 
         let toggle_start = name_start.saturating_add(toggle_offset);
         let toggle_end = toggle_start.saturating_add(toggle_width.saturating_sub(1));
-        column >= toggle_start && column <= toggle_end
+        toggle_start <= column && column <= toggle_end
     }
 
     fn name_column_bounds(&self) -> Option<(u16, u16)> {
