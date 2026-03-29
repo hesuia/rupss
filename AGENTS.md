@@ -15,6 +15,13 @@ Lightweight and efficient, it collects data from `/proc` and renders it in a ter
 - Tests are unit tests colocated in each module under `#[cfg(test)]`.
 - No static assets or external config files are required to run locally.
 
+## Main Dependencies
+- `ratatui`: terminal UI rendering.
+- `crossterm`: terminal input handling and control.
+- `procfs`: reading Linux process info from `/proc`.
+- `strum`: utilities for working with enums.
+- `compact_str`: efficient string storage.
+
 ## Basic Commands
 - `cargo build` compiles the binary.
 - `cargo run` launches the TUI.
@@ -37,8 +44,10 @@ Lightweight and efficient, it collects data from `/proc` and renders it in a ter
 - Use pattern matching (`match`, `if let`, `let else`) to handle different cases explicitly, especially for enums and error handling.avoid complex nested `if` statements; prefer these constructions, early returns or pattern matching.
 - Avoid `unwrap()` and `expect()` in production code; handle errors gracefully.
 - Use iterators and combinators (`map`, `filter`, `fold`, `filter_map` etc.) for collection processing instead of manual loops where appropriate.
+  - Split closures to prevent them from becoming too large.
 - Prefer immutable data structures and minimize mutable state. Use `mut` only when necessary.
-  - In `app.rs`, it's acceptable to use `mut` to some extent, but avoid overusing or using it unnecessarily.
+  - In `app.rs`, it's acceptable to use `mut` to some extent, but avoid overusing.
+  - You can use `mut` for parts closely related to TUI, but for UI-independent parts, avoid using `mut` as much as possible and extract them into functions or methods so they can be tested.
 - Also, follow standard Rust coding conventions to write code that is easy to read and maintain.
 
 ## Testing Guidelines
@@ -62,3 +71,9 @@ Unless testing is absolutely essential or the code relates to TUI, we generally 
 - Linux-only: relies on `/proc` and `smaps_rollup`.
 - Running as non-root may limit access to some process details; the UI should
   degrade gracefully in those cases.
+
+## TUI Design
+- TOP LEFT: RSS history graph
+- TOP RIGHT: SWAP history graph
+- CENTER: summary of all processes (total RSS, total SWAP, top 5 by RSS)
+- BOTTOM: process table with sortable columns (PID, Name, RSS, SWAP, etc.)
