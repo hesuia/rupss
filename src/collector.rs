@@ -161,27 +161,19 @@ impl SystemCollector for ProcfsCollector {
         now: Instant,
     ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), procfs::ProcError> {
         let meminfo = Meminfo::current()?;
-        let mut processes = Vec::new();
-        let mut next_cpu = HashMap::new();
-        let mut total_process_rss = 0u64;
-        let mut total_process_swap = 0u64;
-
-        for process in all_processes()? {
-            let Ok(process) = process else {
-                continue;
-            };
-
-            let Some((row, cpu_sample)) = self.collect_one_process(process, previous_cpu, now)
-            else {
-                continue;
-            };
-
-            total_process_rss = total_process_rss.saturating_add(row.rss_bytes);
-            total_process_swap = total_process_swap.saturating_add(row.base_swap_bytes);
-            next_cpu.insert(row.pid, cpu_sample);
-            processes.push(row);
-        }
-
+        let (processes, next_cpu, total_process_rss, total_process_swap) = all_processes()?
+            .filter_map(|proc| proc.ok())
+            .filter_map(|proc| self.collect_one_process(proc, previous_cpu, now))
+            .fold(
+                (Vec::new(), HashMap::new(), 0u64, 0u64),
+                |(mut rows, mut cpu_cache, total_rss, total_swap), (row, cpu_sample)| {
+                    let total_rss = total_rss.saturating_add(row.rss_bytes);
+                    let total_swap = total_swap.saturating_add(row.base_swap_bytes);
+                    cpu_cache.insert(row.pid, cpu_sample);
+                    rows.push(row);
+                    (rows, cpu_cache, total_rss, total_swap)
+                },
+            );
         let mem_available = meminfo.mem_available;
         let mem_used = meminfo
             .mem_total
@@ -216,39 +208,30 @@ impl SystemCollector for ProcfsCollector {
     }
 
     fn collect_visible_memory_details(&self, pids: &[i32]) -> HashMap<i32, DetailedMemorySample> {
-        let mut details = HashMap::with_capacity(pids.len());
+        pids.iter()
+            .filter_map(|pid| {
+                // Detailed memory metrics are intentionally loaded only for the visible rows.
+                let process = Process::new(*pid).ok()?;
+                let rollup = process.smaps_rollup().ok()?;
+                // let memory_map = rollup.memory_map_rollup.0.first()?;
+                // let map = &memory_map.extension.map;
+                let map = &rollup.memory_map_rollup.0.first()?.extension.map;
+                let uss_bytes = map
+                    .get("Private_Clean")
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(map.get("Private_Dirty").copied().unwrap_or(0));
 
-        for pid in pids {
-            // Detailed memory metrics are intentionally loaded only for the visible rows.
-            let Ok(process) = Process::new(*pid) else {
-                continue;
-            };
-            let Ok(rollup) = process.smaps_rollup() else {
-                continue;
-            };
-            let Some(memory_map) = rollup.memory_map_rollup.0.first() else {
-                continue;
-            };
-            let map = &memory_map.extension.map;
-            let uss_bytes = map
-                .get("Private_Clean")
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(map.get("Private_Dirty").copied().unwrap_or(0));
-            let pss_bytes = map.get("Pss").copied();
-            let swap_bytes = map.get("Swap").copied();
-
-            details.insert(
-                *pid,
-                DetailedMemorySample {
-                    uss_bytes: Some(uss_bytes),
-                    pss_bytes,
-                    swap_bytes,
-                },
-            );
-        }
-
-        details
+                Some((
+                    *pid,
+                    DetailedMemorySample {
+                        uss_bytes: Some(uss_bytes),
+                        pss_bytes: map.get("Pss").copied(),
+                        swap_bytes: map.get("Swap").copied(),
+                    },
+                ))
+            })
+            .collect()
     }
 }
 
