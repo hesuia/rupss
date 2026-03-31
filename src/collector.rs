@@ -1,4 +1,5 @@
 use crate::{
+    error::CollectorError,
     format::truncate_owned,
     snapshot::{HistoryPoint, ProcessRow, Snapshot, SystemSummary},
 };
@@ -62,7 +63,7 @@ pub trait SystemCollector {
         &self,
         previous_cpu: &HashMap<i32, CpuSample>,
         now: Instant,
-    ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), procfs::ProcError>;
+    ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), CollectorError>;
 
     /// Collects heavier memory details only for the currently visible PIDs.
     ///
@@ -159,9 +160,10 @@ impl SystemCollector for ProcfsCollector {
         &self,
         previous_cpu: &HashMap<i32, CpuSample>,
         now: Instant,
-    ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), procfs::ProcError> {
-        let meminfo = Meminfo::current()?;
-        let (processes, next_cpu, total_process_rss, total_process_swap) = all_processes()?
+    ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), CollectorError> {
+        let meminfo = Meminfo::current().map_err(CollectorError::ReadMeminfo)?;
+        let (processes, next_cpu, total_process_rss, total_process_swap) = all_processes()
+            .map_err(CollectorError::ListProcesses)?
             .filter_map(|proc| proc.ok())
             .filter_map(|proc| self.collect_one_process(proc, previous_cpu, now))
             .fold(

@@ -146,7 +146,7 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         ]),
     ];
 
-    if let Some(error) = &app.last_error {
+    if let Some(error) = app.last_error_message() {
         lines.push(Line::from(vec![
             Span::styled(
                 "Last Error ",

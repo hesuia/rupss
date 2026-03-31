@@ -1,5 +1,6 @@
 use crate::{
     collector::{CpuSample, ProcfsCollector, SystemCollector},
+    error::{AppError, CollectorError},
     history::HistoryBuffer,
     snapshot::{
         HistoryPoint, ProcessRow, Snapshot, SortDirection, SortKey, SortState, SystemSummary,
@@ -105,31 +106,35 @@ pub struct AppState {
     collector: ProcfsCollector,
     process_table_area: Option<Rect>,
     /// Most recent collection error kept for on-screen display.
-    pub last_error: Option<String>,
+    pub last_error: Option<CollectorError>,
 }
 
 /// Runs the TUI application until the user quits.
 ///
 /// This sets up the terminal, runs the event loop, and ensures the terminal is
 /// restored even when the loop exits due to user input.
-pub fn run() -> io::Result<()> {
+pub fn run() -> Result<(), AppError> {
     let mut terminal = setup_terminal()?;
     let result = run_app(&mut terminal);
-    restore_terminal(&mut terminal)?;
-    result
+    match restore_terminal(&mut terminal) {
+        Ok(()) => result,
+        Err(error) => Err(error),
+    }
 }
 
-fn run_app(terminal: &mut CrosstermTerminal) -> io::Result<()> {
+fn run_app(terminal: &mut CrosstermTerminal) -> Result<(), AppError> {
     let collector = ProcfsCollector::new();
     let mut app = AppState::new(collector);
-    app.refresh()?;
+    app.refresh();
 
     let mut last_tick = Instant::now();
     loop {
-        terminal.draw(|frame| tui::render(frame, &mut app))?;
+        terminal
+            .draw(|frame| tui::render(frame, &mut app))
+            .map_err(AppError::Render)?;
 
-        if event::poll(EVENT_POLL)? {
-            match event::read()? {
+        if event::poll(EVENT_POLL).map_err(AppError::PollEvents)? {
+            match event::read().map_err(AppError::ReadEvent)? {
                 Event::Key(key) => {
                     if matches!(key.kind, KeyEventKind::Press) {
                         match app.handle_key(key.code) {
@@ -144,7 +149,7 @@ fn run_app(terminal: &mut CrosstermTerminal) -> io::Result<()> {
         }
 
         if last_tick.elapsed() >= TICK_RATE {
-            app.refresh()?;
+            app.refresh();
             last_tick = Instant::now();
         }
     }
@@ -198,7 +203,7 @@ impl AppState {
     /// 2. Sort the list and keep the previously selected PID if still present.
     /// 3. Update the history buffers for the top graphs.
     /// 4. Load `smaps_rollup` details only for the rows currently visible.
-    pub fn refresh(&mut self) -> io::Result<()> {
+    pub fn refresh(&mut self) {
         let selected_pid = self.selected_pid();
         let now = Instant::now();
         match self
@@ -218,13 +223,21 @@ impl AppState {
                 self.push_history(history_point);
                 self.populate_visible_details();
                 self.last_error = None;
-                Ok(())
             }
             Err(error) => {
-                self.last_error = Some(error.to_string());
-                Ok(())
+                self.last_error = Some(error);
             }
         }
+    }
+
+    /// Returns the most recent collection error, if one is being shown in the UI.
+    pub fn last_error(&self) -> Option<&CollectorError> {
+        self.last_error.as_ref()
+    }
+
+    /// Returns the most recent collection error as display text for the summary panel.
+    pub fn last_error_message(&self) -> Option<String> {
+        self.last_error().map(ToString::to_string)
     }
 
     /// Updates the number of table rows that fit on screen.
@@ -949,23 +962,24 @@ fn load_username_cache() -> HashMap<u32, String> {
 }
 
 /// Switches the terminal into raw mode and enters the alternate screen.
-fn setup_terminal() -> io::Result<CrosstermTerminal> {
-    enable_raw_mode()?;
+fn setup_terminal() -> Result<CrosstermTerminal, AppError> {
+    enable_raw_mode().map_err(AppError::SetupTerminal)?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).map_err(AppError::SetupTerminal)?;
     let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend)
+    Terminal::new(backend).map_err(AppError::SetupTerminal)
 }
 
 /// Restores the terminal back to the normal shell state.
-fn restore_terminal(terminal: &mut CrosstermTerminal) -> io::Result<()> {
-    disable_raw_mode()?;
+fn restore_terminal(terminal: &mut CrosstermTerminal) -> Result<(), AppError> {
+    disable_raw_mode().map_err(AppError::RestoreTerminal)?;
     execute!(
         terminal.backend_mut(),
         DisableMouseCapture,
         LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
+    )
+    .map_err(AppError::RestoreTerminal)?;
+    terminal.show_cursor().map_err(AppError::RestoreTerminal)?;
     Ok(())
 }
 
@@ -973,11 +987,13 @@ fn restore_terminal(terminal: &mut CrosstermTerminal) -> io::Result<()> {
 mod tests {
     use super::{AppState, KeyAction, TreeRow, ViewMode, compare_process_rows, history_points};
     use crate::collector::ProcfsCollector;
+    use crate::error::CollectorError;
     use crate::history::HistoryBuffer;
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use procfs::ProcError;
     use ratatui::layout::Rect;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, io};
 
     fn sample_row(pid: i32) -> ProcessRow {
         ProcessRow {
@@ -1498,5 +1514,31 @@ mod tests {
         };
 
         assert_eq!(row.name_toggle_range(), Some((0, 3)));
+    }
+
+    #[test]
+    fn last_error_keeps_typed_collector_error() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.last_error = Some(CollectorError::ReadMeminfo(ProcError::from(
+            io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+        )));
+
+        assert!(matches!(
+            app.last_error(),
+            Some(CollectorError::ReadMeminfo(_))
+        ));
+    }
+
+    #[test]
+    fn last_error_message_formats_collector_error_for_display() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.last_error = Some(CollectorError::ListProcesses(ProcError::from(
+            io::Error::new(io::ErrorKind::NotFound, "missing"),
+        )));
+
+        assert_eq!(
+            app.last_error_message().as_deref(),
+            Some("failed to enumerate /proc processes")
+        );
     }
 }
