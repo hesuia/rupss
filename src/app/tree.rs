@@ -18,48 +18,52 @@ pub(crate) struct TreeRow {
 
 impl AppState {
     pub(crate) fn visible_row_entries(&self) -> Vec<TreeRow> {
-        match self.view_mode {
+        match self.view.view_mode {
             ViewMode::Flat => {
                 let end = self
+                    .view
                     .scroll_offset
-                    .saturating_add(self.viewport_rows)
-                    .min(self.snapshot.processes.len());
-                (self.scroll_offset.min(end)..end)
+                    .saturating_add(self.view.viewport_rows)
+                    .min(self.data.snapshot.processes.len());
+                (self.view.scroll_offset.min(end)..end)
                     .map(TreeRow::flat)
                     .collect()
             }
             ViewMode::Tree => {
                 let end = self
+                    .view
                     .scroll_offset
-                    .saturating_add(self.viewport_rows)
-                    .min(self.tree_rows.len());
-                self.tree_rows[self.scroll_offset.min(end)..end].to_vec()
+                    .saturating_add(self.view.viewport_rows)
+                    .min(self.tree.rows.len());
+                self.tree.rows[self.view.scroll_offset.min(end)..end].to_vec()
             }
         }
     }
 
     pub fn total_visible_rows(&self) -> usize {
-        match self.view_mode {
-            ViewMode::Flat => self.snapshot.processes.len(),
-            ViewMode::Tree => self.tree_rows.len(),
+        match self.view.view_mode {
+            ViewMode::Flat => self.data.snapshot.processes.len(),
+            ViewMode::Tree => self.tree.rows.len(),
         }
     }
 
     pub fn selected_visible_index(&self) -> Option<usize> {
-        match self.view_mode {
-            ViewMode::Flat => (!self.snapshot.processes.is_empty()).then_some(
-                self.selected
-                    .min(self.snapshot.processes.len().saturating_sub(1)),
+        match self.view.view_mode {
+            ViewMode::Flat => (!self.data.snapshot.processes.is_empty()).then_some(
+                self.view
+                    .selected
+                    .min(self.data.snapshot.processes.len().saturating_sub(1)),
             ),
             ViewMode::Tree => self
-                .tree_rows
+                .tree
+                .rows
                 .iter()
-                .position(|row| row.process_index == self.selected),
+                .position(|row| row.process_index == self.view.selected),
         }
     }
 
     pub(super) fn handle_tree_left(&mut self) {
-        if self.view_mode != ViewMode::Tree {
+        if self.view.view_mode != ViewMode::Tree {
             return;
         }
 
@@ -68,13 +72,13 @@ impl AppState {
             return;
         };
 
-        let row = &self.tree_rows[current];
-        let pid = self.snapshot.processes[row.process_index].pid;
+        let row = &self.tree.rows[current];
+        let pid = self.data.snapshot.processes[row.process_index].pid;
         if row.has_children && row.expanded {
-            self.expanded_pids.remove(&pid);
+            self.tree.expanded_pids.remove(&pid);
             self.rebuild_tree_rows();
         } else if let Some(parent_index) = row.parent_index {
-            self.selected = parent_index;
+            self.view.selected = parent_index;
         }
 
         self.ensure_visible();
@@ -82,7 +86,7 @@ impl AppState {
     }
 
     pub(super) fn handle_tree_right(&mut self) {
-        if self.view_mode != ViewMode::Tree {
+        if self.view.view_mode != ViewMode::Tree {
             return;
         }
 
@@ -91,15 +95,15 @@ impl AppState {
             return;
         };
 
-        let row = &self.tree_rows[current];
-        let pid = self.snapshot.processes[row.process_index].pid;
+        let row = &self.tree.rows[current];
+        let pid = self.data.snapshot.processes[row.process_index].pid;
         if row.has_children && !row.expanded {
-            self.expanded_pids.insert(pid);
+            self.tree.expanded_pids.insert(pid);
             self.rebuild_tree_rows();
         } else if row.has_children && row.expanded {
-            if let Some(next_row) = self.tree_rows.get(current + 1) {
+            if let Some(next_row) = self.tree.rows.get(current + 1) {
                 if next_row.parent_index == Some(row.process_index) {
-                    self.selected = next_row.process_index;
+                    self.view.selected = next_row.process_index;
                 }
             }
         }
@@ -109,9 +113,9 @@ impl AppState {
     }
 
     pub(super) fn toggle_expansion(&mut self, process_index: usize) {
-        let pid = self.snapshot.processes[process_index].pid;
-        if !self.expanded_pids.insert(pid) {
-            self.expanded_pids.remove(&pid);
+        let pid = self.data.snapshot.processes[process_index].pid;
+        if !self.tree.expanded_pids.insert(pid) {
+            self.tree.expanded_pids.remove(&pid);
         }
 
         self.rebuild_tree_rows();
@@ -121,17 +125,19 @@ impl AppState {
     }
 
     pub(super) fn ensure_tree_selection_visible(&mut self) {
-        if self.view_mode != ViewMode::Tree || self.selected >= self.snapshot.processes.len() {
+        if self.view.view_mode != ViewMode::Tree
+            || self.view.selected >= self.data.snapshot.processes.len()
+        {
             return;
         }
 
-        let mut current = Some(self.selected);
+        let mut current = Some(self.view.selected);
         let mut changed = false;
         while let Some(index) =
-            current.and_then(|index| self.tree_parents.get(index).copied().flatten())
+            current.and_then(|index| self.tree.parents.get(index).copied().flatten())
         {
-            let pid = self.snapshot.processes[index].pid;
-            changed |= self.expanded_pids.insert(pid);
+            let pid = self.data.snapshot.processes[index].pid;
+            changed |= self.tree.expanded_pids.insert(pid);
             current = Some(index);
         }
 
@@ -141,7 +147,7 @@ impl AppState {
     }
 
     pub(super) fn is_tree_toggle_click(&self, column: u16, row: &TreeRow) -> bool {
-        if self.view_mode != ViewMode::Tree || !row.has_children {
+        if self.view.view_mode != ViewMode::Tree || !row.has_children {
             return false;
         }
 
@@ -163,8 +169,8 @@ impl AppState {
     }
 
     pub(super) fn name_column_bounds(&self) -> Option<(u16, u16)> {
-        let area = self.process_table_area?;
-        let column_widths = process_table_column_widths(self.view_mode);
+        let area = self.view.process_table_area?;
+        let column_widths = process_table_column_widths(self.view.view_mode);
         let mut start = area.x.saturating_add(1);
         for width in column_widths.iter().take(NAME_COLUMN_INDEX) {
             start = start
@@ -176,27 +182,28 @@ impl AppState {
     }
 
     pub(super) fn rebuild_tree_rows(&mut self) {
-        let len = self.snapshot.processes.len();
-        self.tree_rows.clear();
-        self.tree_parents = vec![None; len];
+        let len = self.data.snapshot.processes.len();
+        self.tree.rows.clear();
+        self.tree.parents = vec![None; len];
         if len == 0 {
-            self.expanded_pids.clear();
+            self.tree.expanded_pids.clear();
             return;
         }
 
         let mut pid_to_index = HashMap::with_capacity(len);
-        for (index, row) in self.snapshot.processes.iter().enumerate() {
+        for (index, row) in self.data.snapshot.processes.iter().enumerate() {
             pid_to_index.insert(row.pid, index);
         }
-        self.expanded_pids
+        self.tree
+            .expanded_pids
             .retain(|pid| pid_to_index.contains_key(pid));
 
-        let (mut roots, children) = build_tree_index(&self.snapshot.processes, &pid_to_index);
-        self.tree_parents = build_parent_index(&self.snapshot.processes, &pid_to_index);
+        let (mut roots, children) = build_tree_index(&self.data.snapshot.processes, &pid_to_index);
+        self.tree.parents = build_parent_index(&self.data.snapshot.processes, &pid_to_index);
 
-        let sort_state = self.sort_state;
-        let username_cache = &self.username_cache;
-        let processes = &self.snapshot.processes;
+        let sort_state = self.view.sort_state;
+        let username_cache = &self.resources.username_cache;
+        let processes = &self.data.snapshot.processes;
         let sort_indexes = |indexes: &mut Vec<usize>| {
             indexes.sort_by(|left, right| {
                 compare_process_rows(
@@ -214,11 +221,11 @@ impl AppState {
             sort_indexes(child_indexes);
         }
 
-        self.tree_rows = build_visible_tree_rows(
-            &self.snapshot.processes,
+        self.tree.rows = build_visible_tree_rows(
+            &self.data.snapshot.processes,
             &children,
-            &self.expanded_pids,
-            &self.tree_parents,
+            &self.tree.expanded_pids,
+            &self.tree.parents,
             &roots,
         );
     }

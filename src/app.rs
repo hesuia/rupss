@@ -1,24 +1,21 @@
 mod input;
+mod runtime;
 mod sort;
+mod state;
 mod tree;
 
 use crate::{
-    collector::{CpuSample, ProcfsCollector, SystemCollector},
-    error::{AppError, CollectorError},
+    collector::{ProcfsCollector, SystemCollector},
+    error::CollectorError,
     history::HistoryBuffer,
-    snapshot::{Snapshot, SortDirection, SortKey, SortState, SystemSummary},
-    tui,
-};
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    snapshot::{ProcessRow, Snapshot, SortState, SystemSummary},
 };
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+pub use runtime::run;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
-    io::{self, Stdout},
+    io::Stdout,
     time::{Duration, Instant},
 };
 use strum::{AsRefStr, IntoStaticStr};
@@ -27,6 +24,7 @@ pub(crate) use tree::TreeRow;
 #[cfg(test)]
 use self::sort::compare_process_rows;
 use self::sort::sort_processes;
+use self::state::{AppDataState, AppResources, AppViewState, ProcessTreeState};
 
 const HISTORY_CAPACITY: usize = 180;
 const TICK_RATE: Duration = Duration::from_secs(1);
@@ -69,81 +67,14 @@ impl ViewMode {
 
 /// Mutable application state shared by the collector and the renderer.
 ///
-/// Responsibilities:
-/// - Owns the latest `Snapshot` produced by the collector.
-/// - Keeps UI state (selection, scroll offset, active sort key).
-/// - Maintains fixed-size history buffers for the top graphs.
-/// - Holds a PID -> CPU sample cache so per-process CPU usage can be derived
-///   from two consecutive samples.
-/// - Tracks the last collection error for display instead of crashing the UI.
+/// The state is split into dedicated sub-structures so collection data,
+/// navigation state, tree-derived rows, and external resources evolve
+/// independently.
 pub struct AppState {
-    /// Latest collected snapshot shown in the UI.
-    pub snapshot: Snapshot,
-    /// Sort state for key and direction.
-    pub sort_state: SortState,
-    /// Absolute index of the selected row in `snapshot.processes`.
-    pub selected: usize,
-    /// Absolute start index of the visible table window.
-    pub scroll_offset: usize,
-    pub view_mode: ViewMode,
-    viewport_rows: usize,
-    username_cache: HashMap<u32, String>,
-    rss_history: HistoryBuffer<u64>,
-    swap_history: HistoryBuffer<u64>,
-    previous_cpu: HashMap<i32, CpuSample>,
-    expanded_pids: HashSet<i32>,
-    tree_rows: Vec<TreeRow>,
-    tree_parents: Vec<Option<usize>>,
-    collector: ProcfsCollector,
-    process_table_area: Option<Rect>,
-    /// Most recent collection error kept for on-screen display.
-    pub last_error: Option<CollectorError>,
-}
-
-/// Runs the TUI application until the user quits.
-///
-/// This sets up the terminal, runs the event loop, and ensures the terminal is
-/// restored even when the loop exits due to user input.
-pub fn run() -> Result<(), AppError> {
-    let mut terminal = setup_terminal()?;
-    let result = run_app(&mut terminal);
-    match restore_terminal(&mut terminal) {
-        Ok(()) => result,
-        Err(error) => Err(error),
-    }
-}
-
-fn run_app(terminal: &mut CrosstermTerminal) -> Result<(), AppError> {
-    let collector = ProcfsCollector::new();
-    let mut app = AppState::new(collector);
-    app.refresh();
-
-    let mut last_tick = Instant::now();
-    loop {
-        terminal
-            .draw(|frame| tui::render(frame, &mut app))
-            .map_err(AppError::Render)?;
-
-        if event::poll(EVENT_POLL).map_err(AppError::PollEvents)? {
-            match event::read().map_err(AppError::ReadEvent)? {
-                Event::Key(key) => {
-                    if matches!(key.kind, KeyEventKind::Press) {
-                        match app.handle_key(key.code) {
-                            KeyAction::Quit => return Ok(()),
-                            KeyAction::Continue => {}
-                        }
-                    }
-                }
-                Event::Mouse(mouse) => app.handle_mouse(mouse),
-                _ => {}
-            }
-        }
-
-        if last_tick.elapsed() >= TICK_RATE {
-            app.refresh();
-            last_tick = Instant::now();
-        }
-    }
+    data: AppDataState,
+    view: AppViewState,
+    tree: ProcessTreeState,
+    resources: AppResources,
 }
 
 impl AppState {
@@ -153,37 +84,10 @@ impl AppState {
     /// `refresh()` call.
     pub fn new(collector: ProcfsCollector) -> Self {
         Self {
-            snapshot: Snapshot {
-                captured_at: Instant::now(),
-                system: SystemSummary {
-                    mem_total: 0,
-                    mem_available: None,
-                    mem_free: 0,
-                    mem_used: 0,
-                    swap_total: 0,
-                    swap_free: 0,
-                    swap_used: 0,
-                    total_process_rss: 0,
-                    total_process_swap: 0,
-                    process_count: 0,
-                },
-                processes: Vec::new(),
-            },
-            sort_state: SortState::new(SortKey::Rss, SortDirection::Descending),
-            selected: 0,
-            scroll_offset: 0,
-            view_mode: ViewMode::Flat,
-            viewport_rows: 20,
-            username_cache: load_username_cache(),
-            rss_history: HistoryBuffer::new(HISTORY_CAPACITY),
-            swap_history: HistoryBuffer::new(HISTORY_CAPACITY),
-            previous_cpu: HashMap::new(),
-            expanded_pids: HashSet::new(),
-            tree_rows: Vec::new(),
-            tree_parents: Vec::new(),
-            collector,
-            process_table_area: None,
-            last_error: None,
+            data: AppDataState::new(),
+            view: AppViewState::new(),
+            tree: ProcessTreeState::new(),
+            resources: AppResources::new(collector, load_username_cache()),
         }
     }
 
@@ -198,32 +102,57 @@ impl AppState {
         let selected_pid = self.selected_pid();
         let now = Instant::now();
         match self
+            .resources
             .collector
-            .collect_base_snapshot(&self.previous_cpu, now)
+            .collect_base_snapshot(&self.data.previous_cpu, now)
         {
             Ok((mut snapshot, next_cpu, history_point)) => {
-                self.previous_cpu = next_cpu;
+                self.data.previous_cpu = next_cpu;
                 sort_processes(
-                    self.sort_state,
-                    &self.username_cache,
+                    self.view.sort_state,
+                    &self.resources.username_cache,
                     &mut snapshot.processes,
                 );
-                self.snapshot = snapshot;
+                self.data.snapshot = snapshot;
                 self.rebuild_tree_rows();
                 self.restore_selection(selected_pid, false);
                 self.push_history(history_point);
                 self.populate_visible_details();
-                self.last_error = None;
+                self.data.last_error = None;
             }
             Err(error) => {
-                self.last_error = Some(error);
+                self.data.last_error = Some(error);
             }
         }
     }
 
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.data.snapshot
+    }
+
+    pub fn sort_state(&self) -> SortState {
+        self.view.sort_state
+    }
+
+    pub fn view_mode(&self) -> ViewMode {
+        self.view.view_mode
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.view.scroll_offset
+    }
+
+    pub fn system_summary(&self) -> &SystemSummary {
+        &self.data.snapshot.system
+    }
+
+    pub fn process_row(&self, index: usize) -> Option<&ProcessRow> {
+        self.data.snapshot.processes.get(index)
+    }
+
     /// Returns the most recent collection error, if one is being shown in the UI.
     pub fn last_error(&self) -> Option<&CollectorError> {
-        self.last_error.as_ref()
+        self.data.last_error.as_ref()
     }
 
     /// Returns the most recent collection error as display text for the summary panel.
@@ -233,18 +162,19 @@ impl AppState {
 
     /// Updates the number of table rows that fit on screen.
     pub fn set_viewport_rows(&mut self, rows: usize) {
-        self.viewport_rows = rows.max(1);
+        self.view.viewport_rows = rows.max(1);
         self.clamp_scroll_offset();
     }
 
     /// Stores the process table area from the most recent frame.
     pub fn set_process_table_area(&mut self, area: Rect) {
-        self.process_table_area = Some(area);
+        self.view.process_table_area = Some(area);
     }
 
     /// Resolves a UID into a cached display name or falls back to the numeric UID.
     pub fn owner_name(&self, uid: u32) -> String {
-        self.username_cache
+        self.resources
+            .username_cache
             .get(&uid)
             .cloned()
             .unwrap_or_else(|| uid.to_string())
@@ -252,20 +182,27 @@ impl AppState {
 
     /// Returns the PID of the currently selected row, if any.
     pub fn selected_pid(&self) -> Option<i32> {
-        self.snapshot
+        self.data
+            .snapshot
             .processes
-            .get(self.selected)
+            .get(self.view.selected)
             .map(|row| row.pid)
     }
 
     /// Builds chart points for the RSS history graph.
     pub fn rss_chart_points(&self) -> Vec<(f64, f64)> {
-        history_points(&self.rss_history)
+        history_points(&self.data.rss_history)
     }
 
     /// Builds chart points for the swap history graph.
     pub fn swap_chart_points(&self) -> Vec<(f64, f64)> {
-        history_points(&self.swap_history)
+        history_points(&self.data.swap_history)
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new(ProcfsCollector::new())
     }
 }
 
@@ -305,28 +242,6 @@ fn load_username_cache() -> HashMap<u32, String> {
         users.insert(uid, name.to_string());
     }
     users
-}
-
-/// Switches the terminal into raw mode and enters the alternate screen.
-fn setup_terminal() -> Result<CrosstermTerminal, AppError> {
-    enable_raw_mode().map_err(AppError::SetupTerminal)?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).map_err(AppError::SetupTerminal)?;
-    let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend).map_err(AppError::SetupTerminal)
-}
-
-/// Restores the terminal back to the normal shell state.
-fn restore_terminal(terminal: &mut CrosstermTerminal) -> Result<(), AppError> {
-    disable_raw_mode().map_err(AppError::RestoreTerminal)?;
-    execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )
-    .map_err(AppError::RestoreTerminal)?;
-    terminal.show_cursor().map_err(AppError::RestoreTerminal)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -418,45 +333,45 @@ mod tests {
     #[test]
     fn sort_direction_toggles_on_same_key() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(1), sample_row(2)];
-        app.sort_state = SortState::new(SortKey::Rss, SortDirection::Descending);
+        app.data.snapshot.processes = vec![sample_row(1), sample_row(2)];
+        app.view.sort_state = SortState::new(SortKey::Rss, SortDirection::Descending);
 
         app.handle_key(KeyCode::Char('r'));
-        assert_eq!(app.sort_state.direction, SortDirection::Ascending);
+        assert_eq!(app.view.sort_state.direction, SortDirection::Ascending);
 
         app.handle_key(KeyCode::Char('r'));
-        assert_eq!(app.sort_state.direction, SortDirection::Descending);
+        assert_eq!(app.view.sort_state.direction, SortDirection::Descending);
     }
 
     #[test]
     fn sort_direction_resets_on_new_key() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(1), sample_row(2)];
-        app.sort_state = SortState::new(SortKey::Rss, SortDirection::Descending);
+        app.data.snapshot.processes = vec![sample_row(1), sample_row(2)];
+        app.view.sort_state = SortState::new(SortKey::Rss, SortDirection::Descending);
 
         app.handle_key(KeyCode::Char('i'));
-        assert_eq!(app.sort_state.key, SortKey::Pid);
-        assert_eq!(app.sort_state.direction, SortDirection::Ascending);
+        assert_eq!(app.view.sort_state.key, SortKey::Pid);
+        assert_eq!(app.view.sort_state.direction, SortDirection::Ascending);
     }
 
     #[test]
     fn j_and_k_move_selection() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(1), sample_row(2), sample_row(3)];
+        app.data.snapshot.processes = vec![sample_row(1), sample_row(2), sample_row(3)];
         app.set_viewport_rows(3);
-        app.selected = 1;
+        app.view.selected = 1;
 
         assert_eq!(app.handle_key(KeyCode::Char('j')), KeyAction::Continue);
-        assert_eq!(app.selected, 2);
+        assert_eq!(app.view.selected, 2);
 
         assert_eq!(app.handle_key(KeyCode::Char('j')), KeyAction::Continue);
-        assert_eq!(app.selected, 2);
+        assert_eq!(app.view.selected, 2);
 
         assert_eq!(app.handle_key(KeyCode::Char('k')), KeyAction::Continue);
-        assert_eq!(app.selected, 1);
+        assert_eq!(app.view.selected, 1);
 
         assert_eq!(app.handle_key(KeyCode::Char('k')), KeyAction::Continue);
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.view.selected, 0);
     }
 
     #[test]
@@ -468,7 +383,7 @@ mod tests {
     #[test]
     fn left_click_selects_visible_row() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30)];
+        app.data.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30)];
         app.set_viewport_rows(3);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
 
@@ -479,16 +394,16 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
 
-        assert_eq!(app.selected, 1);
+        assert_eq!(app.view.selected, 1);
     }
 
     #[test]
     fn click_outside_data_rows_does_not_change_selection() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30)];
+        app.data.snapshot.processes = vec![sample_row(10), sample_row(20), sample_row(30)];
         app.set_viewport_rows(3);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
-        app.selected = 2;
+        app.view.selected = 2;
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -509,13 +424,13 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
 
-        assert_eq!(app.selected, 2);
+        assert_eq!(app.view.selected, 2);
     }
 
     #[test]
     fn wheel_scroll_up_changes_offset_not_selected() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![
+        app.data.snapshot.processes = vec![
             sample_row(10),
             sample_row(20),
             sample_row(30),
@@ -523,8 +438,8 @@ mod tests {
         ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
-        app.selected = 3;
-        app.scroll_offset = 2;
+        app.view.selected = 3;
+        app.view.scroll_offset = 2;
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
@@ -533,14 +448,14 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
 
-        assert_eq!(app.scroll_offset, 1);
-        assert_eq!(app.selected, 3);
+        assert_eq!(app.view.scroll_offset, 1);
+        assert_eq!(app.view.selected, 3);
     }
 
     #[test]
     fn wheel_scroll_down_changes_offset_not_selected() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![
+        app.data.snapshot.processes = vec![
             sample_row(10),
             sample_row(20),
             sample_row(30),
@@ -548,8 +463,8 @@ mod tests {
         ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
-        app.selected = 0;
-        app.scroll_offset = 0;
+        app.view.selected = 0;
+        app.view.scroll_offset = 0;
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
@@ -558,14 +473,14 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
 
-        assert_eq!(app.scroll_offset, 1);
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.view.scroll_offset, 1);
+        assert_eq!(app.view.selected, 0);
     }
 
     #[test]
     fn wheel_scroll_clamps_at_bounds() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![
+        app.data.snapshot.processes = vec![
             sample_row(10),
             sample_row(20),
             sample_row(30),
@@ -573,7 +488,7 @@ mod tests {
         ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
-        app.scroll_offset = 0;
+        app.view.scroll_offset = 0;
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
@@ -581,22 +496,22 @@ mod tests {
             row: 3,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.view.scroll_offset, 0);
 
-        app.scroll_offset = 2;
+        app.view.scroll_offset = 2;
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 10,
             row: 3,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(app.scroll_offset, 2);
+        assert_eq!(app.view.scroll_offset, 2);
     }
 
     #[test]
     fn wheel_outside_table_does_not_change_state() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![
+        app.data.snapshot.processes = vec![
             sample_row(10),
             sample_row(20),
             sample_row(30),
@@ -604,8 +519,8 @@ mod tests {
         ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(0, 0, 40, 8));
-        app.selected = 2;
-        app.scroll_offset = 1;
+        app.view.selected = 2;
+        app.view.scroll_offset = 1;
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
@@ -614,14 +529,14 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
 
-        assert_eq!(app.scroll_offset, 1);
-        assert_eq!(app.selected, 2);
+        assert_eq!(app.view.scroll_offset, 1);
+        assert_eq!(app.view.selected, 2);
     }
 
     #[test]
     fn wheel_on_table_border_is_handled() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![
+        app.data.snapshot.processes = vec![
             sample_row(10),
             sample_row(20),
             sample_row(30),
@@ -629,7 +544,7 @@ mod tests {
         ];
         app.set_viewport_rows(2);
         app.set_process_table_area(Rect::new(5, 2, 40, 8));
-        app.scroll_offset = 0;
+        app.view.scroll_offset = 0;
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
@@ -638,32 +553,32 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
 
-        assert_eq!(app.scroll_offset, 1);
+        assert_eq!(app.view.scroll_offset, 1);
     }
 
     #[test]
     fn set_viewport_rows_does_not_force_selected_visible() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![
+        app.data.snapshot.processes = vec![
             sample_row(10),
             sample_row(20),
             sample_row(30),
             sample_row(40),
             sample_row(50),
         ];
-        app.selected = 0;
-        app.scroll_offset = 2;
+        app.view.selected = 0;
+        app.view.scroll_offset = 2;
 
         app.set_viewport_rows(2);
 
-        assert_eq!(app.scroll_offset, 2);
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.view.scroll_offset, 2);
+        assert_eq!(app.view.selected, 0);
     }
 
     #[test]
     fn restore_selection_without_ensure_visible_keeps_scroll_offset() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.snapshot.processes = vec![
+        app.data.snapshot.processes = vec![
             sample_row(10),
             sample_row(20),
             sample_row(30),
@@ -671,20 +586,20 @@ mod tests {
             sample_row(50),
         ];
         app.set_viewport_rows(2);
-        app.selected = 0;
-        app.scroll_offset = 3;
+        app.view.selected = 0;
+        app.view.scroll_offset = 3;
 
         app.restore_selection(Some(10), false);
 
-        assert_eq!(app.selected, 0);
-        assert_eq!(app.scroll_offset, 3);
+        assert_eq!(app.view.selected, 0);
+        assert_eq!(app.view.scroll_offset, 3);
     }
 
     #[test]
     fn tree_mode_starts_with_roots_only() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
-        app.snapshot.processes = vec![
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![
             tree_row(1, 0),
             tree_row(2, 1),
             tree_row(3, 1),
@@ -696,18 +611,18 @@ mod tests {
         let visible: Vec<i32> = app
             .visible_row_entries()
             .into_iter()
-            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .map(|entry| app.data.snapshot.processes[entry.process_index].pid)
             .collect();
 
-        assert_eq!(app.view_mode, ViewMode::Tree);
+        assert_eq!(app.view.view_mode, ViewMode::Tree);
         assert_eq!(visible, vec![1, 4]);
     }
 
     #[test]
     fn tree_right_expands_and_left_collapses() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
-        app.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 2)];
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 2)];
         app.rebuild_tree_rows();
         app.handle_key(KeyCode::Char('t'));
 
@@ -715,7 +630,7 @@ mod tests {
         let visible_after_expand: Vec<i32> = app
             .visible_row_entries()
             .into_iter()
-            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .map(|entry| app.data.snapshot.processes[entry.process_index].pid)
             .collect();
         assert_eq!(visible_after_expand, vec![1, 2]);
 
@@ -723,7 +638,7 @@ mod tests {
         let visible_after_collapse: Vec<i32> = app
             .visible_row_entries()
             .into_iter()
-            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .map(|entry| app.data.snapshot.processes[entry.process_index].pid)
             .collect();
         assert_eq!(visible_after_collapse, vec![1]);
     }
@@ -731,8 +646,8 @@ mod tests {
     #[test]
     fn tree_gutter_click_toggles_expansion() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
-        app.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
         app.rebuild_tree_rows();
         app.handle_key(KeyCode::Char('t'));
         app.set_viewport_rows(5);
@@ -749,7 +664,7 @@ mod tests {
         let visible: Vec<i32> = app
             .visible_row_entries()
             .into_iter()
-            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .map(|entry| app.data.snapshot.processes[entry.process_index].pid)
             .collect();
         assert_eq!(visible, vec![1, 2, 3]);
     }
@@ -757,10 +672,10 @@ mod tests {
     #[test]
     fn tree_name_branch_click_selects_without_toggling() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
-        app.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
         app.rebuild_tree_rows();
-        app.expanded_pids.insert(1);
+        app.tree.expanded_pids.insert(1);
         app.rebuild_tree_rows();
         app.handle_key(KeyCode::Char('t'));
         app.set_viewport_rows(5);
@@ -778,7 +693,7 @@ mod tests {
         let visible: Vec<i32> = app
             .visible_row_entries()
             .into_iter()
-            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .map(|entry| app.data.snapshot.processes[entry.process_index].pid)
             .collect();
         assert_eq!(visible, vec![1, 2, 3]);
     }
@@ -792,7 +707,7 @@ mod tests {
         child_a.rss_bytes = 10;
         let mut child_b = tree_row(3, 1);
         child_b.rss_bytes = 50;
-        app.snapshot.processes = vec![parent, child_a, child_b];
+        app.data.snapshot.processes = vec![parent, child_a, child_b];
         app.rebuild_tree_rows();
         app.handle_key(KeyCode::Char('t'));
         app.handle_key(KeyCode::Right);
@@ -800,7 +715,7 @@ mod tests {
         let visible: Vec<i32> = app
             .visible_row_entries()
             .into_iter()
-            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .map(|entry| app.data.snapshot.processes[entry.process_index].pid)
             .collect();
 
         assert_eq!(visible, vec![1, 3, 2]);
@@ -809,8 +724,8 @@ mod tests {
     #[test]
     fn tree_mode_keeps_multiple_unresolved_roots_visible() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
-        app.snapshot.processes = vec![
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![
             tree_row(1, 0),
             tree_row(2, 9999),
             tree_row(3, -1),
@@ -823,7 +738,7 @@ mod tests {
         let visible: Vec<i32> = app
             .visible_row_entries()
             .into_iter()
-            .map(|entry| app.snapshot.processes[entry.process_index].pid)
+            .map(|entry| app.data.snapshot.processes[entry.process_index].pid)
             .collect();
 
         assert_eq!(visible, vec![1, 2, 3, 4]);
@@ -832,16 +747,16 @@ mod tests {
     #[test]
     fn tree_child_of_non_last_root_tracks_root_vertical_guide() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
-        app.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
-        app.expanded_pids.insert(1);
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
+        app.tree.expanded_pids.insert(1);
         app.rebuild_tree_rows();
         app.handle_key(KeyCode::Char('t'));
 
         let child = app
             .visible_row_entries()
             .into_iter()
-            .find(|entry| app.snapshot.processes[entry.process_index].pid == 2)
+            .find(|entry| app.data.snapshot.processes[entry.process_index].pid == 2)
             .unwrap();
 
         assert_eq!(child.ancestor_has_next_sibling, vec![true]);
@@ -865,7 +780,7 @@ mod tests {
     #[test]
     fn last_error_keeps_typed_collector_error() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.last_error = Some(CollectorError::ReadMeminfo(ProcError::from(
+        app.data.last_error = Some(CollectorError::ReadMeminfo(ProcError::from(
             io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
         )));
 
@@ -878,7 +793,7 @@ mod tests {
     #[test]
     fn last_error_message_formats_collector_error_for_display() {
         let mut app = AppState::new(ProcfsCollector::new());
-        app.last_error = Some(CollectorError::ListProcesses(ProcError::from(
+        app.data.last_error = Some(CollectorError::ListProcesses(ProcError::from(
             io::Error::new(io::ErrorKind::NotFound, "missing"),
         )));
 

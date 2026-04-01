@@ -39,20 +39,21 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
 }
 
 fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: bool) {
+    let snapshot = app.snapshot();
     let (title, points, latest_value, y_axis_upper, color) = if rss {
         (
             "RSS History",
             app.rss_chart_points(),
-            app.snapshot.system.total_process_rss,
-            chart_y_upper_bound(app.snapshot.system.mem_total),
+            snapshot.system.total_process_rss,
+            chart_y_upper_bound(snapshot.system.mem_total),
             Color::LightGreen,
         )
     } else {
         (
             "Swap History",
             app.swap_chart_points(),
-            app.snapshot.system.total_process_swap,
-            chart_y_upper_bound(app.snapshot.system.swap_total),
+            snapshot.system.total_process_swap,
+            chart_y_upper_bound(snapshot.system.swap_total),
             Color::LightBlue,
         )
     };
@@ -94,7 +95,8 @@ fn chart_y_upper_bound(total_bytes: u64) -> u64 {
 }
 
 fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let system = &app.snapshot.system;
+    let snapshot = app.snapshot();
+    let system = app.system_summary();
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -137,11 +139,11 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                 system.process_count,
                 format_bytes(system.total_process_rss),
                 format_bytes(system.total_process_swap),
-                app.sort_state.label(),
-                app.view_mode.as_ref(),
+                app.sort_state().label(),
+                app.view_mode().as_ref(),
                 app.selected_pid()
                     .map_or("-".to_string(), |pid| pid.to_string()),
-                app.snapshot.captured_at.elapsed().as_millis()
+                snapshot.captured_at.elapsed().as_millis()
             )),
         ]),
     ];
@@ -177,13 +179,15 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
 
     let visible_rows = app.visible_row_entries();
     let rows = visible_rows.iter().enumerate().map(|(visible_idx, entry)| {
-        let row = &app.snapshot.processes[entry.process_index];
-        let style = if app.selected_visible_index() == Some(app.scroll_offset + visible_idx) {
+        let row = app
+            .process_row(entry.process_index)
+            .expect("visible row exists");
+        let style = if app.selected_visible_index() == Some(app.scroll_offset() + visible_idx) {
             Style::default().bg(Color::DarkGray).fg(Color::White)
         } else {
             Style::default()
         };
-        let name_cell = match app.view_mode {
+        let name_cell = match app.view_mode() {
             ViewMode::Flat => row.name.clone(),
             ViewMode::Tree => format_tree_name(entry, &row.name),
         };
@@ -206,7 +210,7 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
 
     let table = Table::new(
         rows,
-        process_table_column_widths(app.view_mode).map(Constraint::Length),
+        process_table_column_widths(app.view_mode()).map(Constraint::Length),
     )
     .header(header)
     .block(

@@ -15,10 +15,10 @@ impl AppState {
             KeyCode::Up | KeyCode::Char('k') => self.move_selection_and_continue(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection_and_continue(1),
             KeyCode::PageUp => {
-                self.move_selection_and_continue(-(self.viewport_rows.max(1) as isize))
+                self.move_selection_and_continue(-(self.view.viewport_rows.max(1) as isize))
             }
             KeyCode::PageDown => {
-                self.move_selection_and_continue(self.viewport_rows.max(1) as isize)
+                self.move_selection_and_continue(self.view.viewport_rows.max(1) as isize)
             }
             KeyCode::Home => self.jump_to_boundary_and_continue(true),
             KeyCode::End => self.jump_to_boundary_and_continue(false),
@@ -63,23 +63,24 @@ impl AppState {
     }
 
     pub(super) fn restore_selection(&mut self, selected_pid: Option<i32>, ensure_visible: bool) {
-        if self.snapshot.processes.is_empty() {
-            self.selected = 0;
-            self.scroll_offset = 0;
+        if self.data.snapshot.processes.is_empty() {
+            self.view.selected = 0;
+            self.view.scroll_offset = 0;
             return;
         }
 
-        self.selected = selected_pid
+        self.view.selected = selected_pid
             .and_then(|pid| {
-                self.snapshot
+                self.data
+                    .snapshot
                     .processes
                     .iter()
                     .position(|row| row.pid == pid)
             })
             .unwrap_or(0)
-            .min(self.snapshot.processes.len().saturating_sub(1));
+            .min(self.data.snapshot.processes.len().saturating_sub(1));
 
-        if self.view_mode == ViewMode::Tree {
+        if self.view.view_mode == ViewMode::Tree {
             self.ensure_tree_selection_visible();
         }
 
@@ -91,8 +92,8 @@ impl AppState {
     }
 
     pub(super) fn push_history(&mut self, point: HistoryPoint) {
-        self.rss_history.push(point.rss_bytes);
-        self.swap_history.push(point.swap_bytes);
+        self.data.rss_history.push(point.rss_bytes);
+        self.data.swap_history.push(point.swap_bytes);
     }
 
     pub(super) fn populate_visible_details(&mut self) {
@@ -101,8 +102,11 @@ impl AppState {
             return;
         }
 
-        let details = self.collector.collect_visible_memory_details(&pids);
-        for row in &mut self.snapshot.processes {
+        let details = self
+            .resources
+            .collector
+            .collect_visible_memory_details(&pids);
+        for row in &mut self.data.snapshot.processes {
             if let Some(detail) = details.get(&row.pid) {
                 row.uss_bytes = detail.uss_bytes;
                 row.pss_bytes = detail.pss_bytes;
@@ -112,19 +116,22 @@ impl AppState {
     }
 
     pub(super) fn ensure_visible(&mut self) {
-        let selected_visible = match self.view_mode {
-            ViewMode::Flat => self.selected,
+        let selected_visible = match self.view.view_mode {
+            ViewMode::Flat => self.view.selected,
             ViewMode::Tree => self.selected_visible_index().unwrap_or(0),
         };
 
-        if selected_visible < self.scroll_offset {
-            self.scroll_offset = selected_visible;
+        if selected_visible < self.view.scroll_offset {
+            self.view.scroll_offset = selected_visible;
         }
 
-        let view_end = self.scroll_offset.saturating_add(self.viewport_rows);
+        let view_end = self
+            .view
+            .scroll_offset
+            .saturating_add(self.view.viewport_rows);
         if selected_visible >= view_end {
-            self.scroll_offset =
-                selected_visible.saturating_sub(self.viewport_rows.saturating_sub(1));
+            self.view.scroll_offset =
+                selected_visible.saturating_sub(self.view.viewport_rows.saturating_sub(1));
         }
 
         self.clamp_scroll_offset();
@@ -133,8 +140,8 @@ impl AppState {
     pub(super) fn clamp_scroll_offset(&mut self) {
         let max_offset = self
             .total_visible_rows()
-            .saturating_sub(self.viewport_rows.max(1));
-        self.scroll_offset = self.scroll_offset.min(max_offset);
+            .saturating_sub(self.view.viewport_rows.max(1));
+        self.view.scroll_offset = self.view.scroll_offset.min(max_offset);
     }
 
     fn resort_and_continue(&mut self, sort_key: SortKey) -> KeyAction {
@@ -148,16 +155,18 @@ impl AppState {
     }
 
     fn jump_to_boundary_and_continue(&mut self, to_start: bool) -> KeyAction {
-        self.selected = match (self.view_mode, to_start) {
+        self.view.selected = match (self.view.view_mode, to_start) {
             (ViewMode::Flat, true) => 0,
-            (ViewMode::Flat, false) => self.snapshot.processes.len().saturating_sub(1),
+            (ViewMode::Flat, false) => self.data.snapshot.processes.len().saturating_sub(1),
             (ViewMode::Tree, true) => self
-                .tree_rows
+                .tree
+                .rows
                 .first()
                 .map(|row| row.process_index)
                 .unwrap_or(0),
             (ViewMode::Tree, false) => self
-                .tree_rows
+                .tree
+                .rows
                 .last()
                 .map(|row| row.process_index)
                 .unwrap_or(0),
@@ -168,12 +177,12 @@ impl AppState {
     }
 
     fn resort(&mut self, sort_key: SortKey) {
-        self.sort_state.toggle_key(sort_key);
+        self.view.sort_state.toggle_key(sort_key);
         let selected_pid = self.selected_pid();
         sort_processes(
-            self.sort_state,
-            &self.username_cache,
-            &mut self.snapshot.processes,
+            self.view.sort_state,
+            &self.resources.username_cache,
+            &mut self.data.snapshot.processes,
         );
         self.rebuild_tree_rows();
         self.restore_selection(selected_pid, true);
@@ -184,7 +193,7 @@ impl AppState {
         if self.total_visible_rows() == 0 {
             return;
         }
-        if self.view_mode == ViewMode::Tree {
+        if self.view.view_mode == ViewMode::Tree {
             self.ensure_tree_selection_visible();
         }
 
@@ -193,16 +202,16 @@ impl AppState {
         };
         let max_index = self.total_visible_rows().saturating_sub(1) as isize;
         let next = (current as isize + delta).clamp(0, max_index) as usize;
-        self.selected = match self.view_mode {
+        self.view.selected = match self.view.view_mode {
             ViewMode::Flat => next,
-            ViewMode::Tree => self.tree_rows[next].process_index,
+            ViewMode::Tree => self.tree.rows[next].process_index,
         };
         self.ensure_visible();
         self.populate_visible_details();
     }
 
     fn select_process_at(&mut self, column: u16, row: u16) {
-        let Some(area) = self.process_table_area else {
+        let Some(area) = self.view.process_table_area else {
             return;
         };
         if area.width < 3 || area.height < 4 {
@@ -228,12 +237,12 @@ impl AppState {
 
         let clicked = &visible_rows[data_row];
         if self.is_tree_toggle_click(column, clicked) {
-            self.selected = clicked.process_index;
+            self.view.selected = clicked.process_index;
             self.toggle_expansion(clicked.process_index);
             return;
         }
 
-        self.selected = clicked.process_index;
+        self.view.selected = clicked.process_index;
         self.ensure_visible();
         self.populate_visible_details();
     }
@@ -244,9 +253,9 @@ impl AppState {
         }
 
         if delta < 0 {
-            self.scroll_offset = self.scroll_offset.saturating_sub(delta.unsigned_abs());
+            self.view.scroll_offset = self.view.scroll_offset.saturating_sub(delta.unsigned_abs());
         } else {
-            self.scroll_offset = self.scroll_offset.saturating_add(delta as usize);
+            self.view.scroll_offset = self.view.scroll_offset.saturating_add(delta as usize);
         }
 
         self.clamp_scroll_offset();
@@ -254,7 +263,7 @@ impl AppState {
     }
 
     fn is_inside_process_table(&self, column: u16, row: u16) -> bool {
-        let Some(area) = self.process_table_area else {
+        let Some(area) = self.view.process_table_area else {
             return false;
         };
         let right = area.x.saturating_add(area.width.saturating_sub(1));
@@ -265,13 +274,13 @@ impl AppState {
     fn visible_pids(&self) -> Vec<i32> {
         self.visible_row_entries()
             .into_iter()
-            .map(|entry| self.snapshot.processes[entry.process_index].pid)
+            .map(|entry| self.data.snapshot.processes[entry.process_index].pid)
             .collect()
     }
 
     fn toggle_view_mode(&mut self) {
-        self.view_mode = self.view_mode.toggle();
-        if self.view_mode == ViewMode::Tree {
+        self.view.view_mode = self.view.view_mode.toggle();
+        if self.view.view_mode == ViewMode::Tree {
             self.ensure_tree_selection_visible();
         }
         self.ensure_visible();
