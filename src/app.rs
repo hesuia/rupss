@@ -1,4 +1,5 @@
 mod input;
+mod navigation;
 mod runtime;
 mod sort;
 mod state;
@@ -23,7 +24,7 @@ pub(crate) use tree::TreeRow;
 
 #[cfg(test)]
 use self::sort::compare_process_rows;
-use self::sort::sort_processes;
+// use self::sort::sort_processes;
 use self::state::{AppDataState, AppResources, AppViewState, ProcessTreeState};
 
 const HISTORY_CAPACITY: usize = 180;
@@ -108,11 +109,7 @@ impl AppState {
         {
             Ok((mut snapshot, next_cpu, history_point)) => {
                 self.data.previous_cpu = next_cpu;
-                sort_processes(
-                    self.view.sort_state,
-                    &self.resources.username_cache,
-                    &mut snapshot.processes,
-                );
+                self.sort_snapshot_processes(&mut snapshot.processes);
                 self.data.snapshot = snapshot;
                 self.rebuild_tree_rows();
                 self.restore_selection(selected_pid, false);

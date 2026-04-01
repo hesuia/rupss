@@ -1,4 +1,10 @@
-use super::{AppState, KeyAction, ViewMode, sort::sort_processes};
+use super::{
+    AppState, KeyAction, ViewMode,
+    navigation::{
+        boundary_selection, clamp_scroll_offset, ensure_visible_scroll, is_inside_table,
+        move_visible_index, restored_selection, table_hit_test,
+    },
+};
 use crate::collector::SystemCollector;
 use crate::snapshot::{HistoryPoint, SortKey};
 use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
@@ -69,16 +75,7 @@ impl AppState {
             return;
         }
 
-        self.view.selected = selected_pid
-            .and_then(|pid| {
-                self.data
-                    .snapshot
-                    .processes
-                    .iter()
-                    .position(|row| row.pid == pid)
-            })
-            .unwrap_or(0)
-            .min(self.data.snapshot.processes.len().saturating_sub(1));
+        self.view.selected = restored_selection(selected_pid, &self.data.snapshot.processes);
 
         if self.view.view_mode == ViewMode::Tree {
             self.ensure_tree_selection_visible();
@@ -121,27 +118,20 @@ impl AppState {
             ViewMode::Tree => self.selected_visible_index().unwrap_or(0),
         };
 
-        if selected_visible < self.view.scroll_offset {
-            self.view.scroll_offset = selected_visible;
-        }
-
-        let view_end = self
-            .view
-            .scroll_offset
-            .saturating_add(self.view.viewport_rows);
-        if selected_visible >= view_end {
-            self.view.scroll_offset =
-                selected_visible.saturating_sub(self.view.viewport_rows.saturating_sub(1));
-        }
-
-        self.clamp_scroll_offset();
+        self.view.scroll_offset = ensure_visible_scroll(
+            selected_visible,
+            self.view.scroll_offset,
+            self.view.viewport_rows,
+            self.total_visible_rows(),
+        );
     }
 
     pub(super) fn clamp_scroll_offset(&mut self) {
-        let max_offset = self
-            .total_visible_rows()
-            .saturating_sub(self.view.viewport_rows.max(1));
-        self.view.scroll_offset = self.view.scroll_offset.min(max_offset);
+        self.view.scroll_offset = clamp_scroll_offset(
+            self.view.scroll_offset,
+            self.total_visible_rows(),
+            self.view.viewport_rows,
+        );
     }
 
     fn resort_and_continue(&mut self, sort_key: SortKey) -> KeyAction {
@@ -155,22 +145,12 @@ impl AppState {
     }
 
     fn jump_to_boundary_and_continue(&mut self, to_start: bool) -> KeyAction {
-        self.view.selected = match (self.view.view_mode, to_start) {
-            (ViewMode::Flat, true) => 0,
-            (ViewMode::Flat, false) => self.data.snapshot.processes.len().saturating_sub(1),
-            (ViewMode::Tree, true) => self
-                .tree
-                .rows
-                .first()
-                .map(|row| row.process_index)
-                .unwrap_or(0),
-            (ViewMode::Tree, false) => self
-                .tree
-                .rows
-                .last()
-                .map(|row| row.process_index)
-                .unwrap_or(0),
-        };
+        self.view.selected = boundary_selection(
+            self.view.view_mode,
+            self.data.snapshot.processes.len(),
+            &self.tree.rows,
+            to_start,
+        );
         self.ensure_visible();
         self.populate_visible_details();
         KeyAction::Continue
@@ -179,11 +159,7 @@ impl AppState {
     fn resort(&mut self, sort_key: SortKey) {
         self.view.sort_state.toggle_key(sort_key);
         let selected_pid = self.selected_pid();
-        sort_processes(
-            self.view.sort_state,
-            &self.resources.username_cache,
-            &mut self.data.snapshot.processes,
-        );
+        self.sort_current_processes();
         self.rebuild_tree_rows();
         self.restore_selection(selected_pid, true);
         self.populate_visible_details();
@@ -197,11 +173,14 @@ impl AppState {
             self.ensure_tree_selection_visible();
         }
 
-        let Some(current) = self.selected_visible_index() else {
-            return;
+        let next = match move_visible_index(
+            self.selected_visible_index(),
+            delta,
+            self.total_visible_rows(),
+        ) {
+            Some(next) => next,
+            None => return,
         };
-        let max_index = self.total_visible_rows().saturating_sub(1) as isize;
-        let next = (current as isize + delta).clamp(0, max_index) as usize;
         self.view.selected = match self.view.view_mode {
             ViewMode::Flat => next,
             ViewMode::Tree => self.tree.rows[next].process_index,
@@ -214,22 +193,9 @@ impl AppState {
         let Some(area) = self.view.process_table_area else {
             return;
         };
-        if area.width < 3 || area.height < 4 {
+        let Some(data_row) = table_hit_test(area, column, row) else {
             return;
-        }
-
-        let left = area.x.saturating_add(1);
-        let right = area.x.saturating_add(area.width.saturating_sub(2));
-        if column < left || column > right {
-            return;
-        }
-        let first_data_row = area.y.saturating_add(2);
-        let last_data_row = area.y.saturating_add(area.height.saturating_sub(2));
-        if row < first_data_row || row > last_data_row {
-            return;
-        }
-
-        let data_row = row.saturating_sub(first_data_row) as usize;
+        };
         let visible_rows = self.visible_row_entries();
         if data_row >= visible_rows.len() {
             return;
@@ -248,7 +214,10 @@ impl AppState {
     }
 
     fn scroll_with_wheel(&mut self, column: u16, row: u16, delta: isize) {
-        if !self.is_inside_process_table(column, row) || self.total_visible_rows() == 0 {
+        let Some(area) = self.view.process_table_area else {
+            return;
+        };
+        if !is_inside_table(area, column, row) || self.total_visible_rows() == 0 {
             return;
         }
 
@@ -260,15 +229,6 @@ impl AppState {
 
         self.clamp_scroll_offset();
         self.populate_visible_details();
-    }
-
-    fn is_inside_process_table(&self, column: u16, row: u16) -> bool {
-        let Some(area) = self.view.process_table_area else {
-            return false;
-        };
-        let right = area.x.saturating_add(area.width.saturating_sub(1));
-        let bottom = area.y.saturating_add(area.height.saturating_sub(1));
-        area.x <= column && column <= right && area.y <= row && row <= bottom
     }
 
     fn visible_pids(&self) -> Vec<i32> {
