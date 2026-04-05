@@ -1,4 +1,4 @@
-use super::{HISTORY_CAPACITY, TreeRow, ViewMode};
+use super::{HISTORY_CAPACITY, TreeRow, ViewMode, owners::OwnerNameResolverImpl};
 use crate::{
     collector::{CpuSample, ProcfsCollector},
     error::CollectorError,
@@ -74,14 +74,14 @@ impl ProcessTreeState {
 
 /// Shared resources and caches used by state transitions.
 pub(super) struct AppResources {
-    pub(super) username_cache: HashMap<u32, String>,
+    pub(super) owner_resolver: OwnerNameResolverImpl,
     pub(super) collector: ProcfsCollector,
 }
 
 impl AppResources {
-    pub(super) fn new(collector: ProcfsCollector, username_cache: HashMap<u32, String>) -> Self {
+    pub(super) fn new(collector: ProcfsCollector, owner_resolver: OwnerNameResolverImpl) -> Self {
         Self {
-            username_cache,
+            owner_resolver,
             collector,
         }
     }

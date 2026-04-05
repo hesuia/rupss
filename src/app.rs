@@ -1,9 +1,12 @@
 mod input;
 mod navigation;
+mod owners;
 mod runtime;
 mod sort;
 mod state;
 mod tree;
+
+pub use runtime::run;
 
 use crate::{
     collector::{ProcfsCollector, SystemCollector},
@@ -12,10 +15,7 @@ use crate::{
     snapshot::{ProcessRow, Snapshot, SortState, SystemSummary},
 };
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
-pub use runtime::run;
 use std::{
-    collections::HashMap,
-    fs,
     io::Stdout,
     time::{Duration, Instant},
 };
@@ -25,6 +25,7 @@ pub(crate) use tree::TreeRow;
 #[cfg(test)]
 use self::sort::compare_process_rows;
 // use self::sort::sort_processes;
+use self::owners::OwnerNameResolverImpl;
 use self::state::{AppDataState, AppResources, AppViewState, ProcessTreeState};
 
 const HISTORY_CAPACITY: usize = 180;
@@ -88,7 +89,7 @@ impl AppState {
             data: AppDataState::new(),
             view: AppViewState::new(),
             tree: ProcessTreeState::new(),
-            resources: AppResources::new(collector, load_username_cache()),
+            resources: AppResources::new(collector, OwnerNameResolverImpl::new()),
         }
     }
 
@@ -170,11 +171,7 @@ impl AppState {
 
     /// Resolves a UID into a cached display name or falls back to the numeric UID.
     pub fn owner_name(&self, uid: u32) -> String {
-        self.resources
-            .username_cache
-            .get(&uid)
-            .cloned()
-            .unwrap_or_else(|| uid.to_string())
+        self.resources.owner_resolver.owner_name(uid)
     }
 
     /// Returns the PID of the currently selected row, if any.
@@ -214,36 +211,10 @@ fn history_points(history: &HistoryBuffer<u64>) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// Loads a small UID-to-name cache from `/etc/passwd` for owner display.
-fn load_username_cache() -> HashMap<u32, String> {
-    let Ok(contents) = fs::read_to_string("/etc/passwd") else {
-        return HashMap::new();
-    };
-
-    let mut users = HashMap::new();
-    for line in contents.lines() {
-        if line.trim().is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut fields = line.split(':');
-        let Some(name) = fields.next() else {
-            continue;
-        };
-        let _password = fields.next();
-        let Some(uid) = fields.next() else {
-            continue;
-        };
-        let Ok(uid) = uid.parse::<u32>() else {
-            continue;
-        };
-        users.insert(uid, name.to_string());
-    }
-    users
-}
-
 #[cfg(test)]
 mod tests {
     use super::{AppState, KeyAction, TreeRow, ViewMode, compare_process_rows, history_points};
+    use crate::app::owners::OwnerNameResolver;
     use crate::collector::ProcfsCollector;
     use crate::error::CollectorError;
     use crate::history::HistoryBuffer;
@@ -251,7 +222,8 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use procfs::ProcError;
     use ratatui::layout::Rect;
-    use std::{collections::HashMap, io};
+    use std::collections::HashMap;
+    use std::io;
 
     fn sample_row(pid: i32) -> ProcessRow {
         ProcessRow {
@@ -276,6 +248,19 @@ mod tests {
         row
     }
 
+    struct TestOwnerLookup {
+        owners: HashMap<u32, String>,
+    }
+
+    impl OwnerNameResolver for TestOwnerLookup {
+        fn owner_name(&self, uid: u32) -> String {
+            self.owners
+                .get(&uid)
+                .cloned()
+                .unwrap_or_else(|| uid.to_string())
+        }
+    }
+
     #[test]
     fn chart_points_preserve_order() {
         let mut history = HistoryBuffer::new(4);
@@ -287,9 +272,12 @@ mod tests {
 
     #[test]
     fn sort_prefers_highest_metric() {
+        let owners = TestOwnerLookup {
+            owners: HashMap::new(),
+        };
         let ordering = compare_process_rows(
             SortState::new(SortKey::Cpu, SortDirection::Descending),
-            &HashMap::new(),
+            &owners,
             &sample_row(10),
             &sample_row(20),
         );
@@ -298,9 +286,12 @@ mod tests {
 
     #[test]
     fn sort_by_pid_is_ascending() {
+        let owners = TestOwnerLookup {
+            owners: HashMap::new(),
+        };
         let ordering = compare_process_rows(
             SortState::new(SortKey::Pid, SortDirection::Ascending),
-            &HashMap::new(),
+            &owners,
             &sample_row(10),
             &sample_row(20),
         );
@@ -309,9 +300,12 @@ mod tests {
 
     #[test]
     fn sort_by_owner_is_case_insensitive() {
-        let mut owners = HashMap::new();
-        owners.insert(1000, "Alice".to_string());
-        owners.insert(1001, "bob".to_string());
+        let mut owner_names = HashMap::new();
+        owner_names.insert(1000, "Alice".to_string());
+        owner_names.insert(1001, "bob".to_string());
+        let owners = TestOwnerLookup {
+            owners: owner_names,
+        };
 
         let mut left = sample_row(10);
         left.owner_uid = 1000;
@@ -325,6 +319,13 @@ mod tests {
             &right,
         );
         assert_eq!(ordering, std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn owner_name_falls_back_to_numeric_uid() {
+        let app = AppState::new(ProcfsCollector::new());
+
+        assert_eq!(app.owner_name(u32::MAX), u32::MAX.to_string());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::{
-    AppState, NAME_COLUMN_INDEX, PROCESS_TABLE_COLUMN_SPACING, ViewMode,
+    AppState, NAME_COLUMN_INDEX, PROCESS_TABLE_COLUMN_SPACING, ViewMode, owners::OwnerNameResolver,
     process_table_column_widths, sort::compare_process_rows, state::ProcessTreeState,
 };
 use crate::snapshot::{ProcessRow, SortState};
@@ -166,7 +166,7 @@ impl AppState {
         self.tree = build_process_tree_state(
             &self.data.snapshot.processes,
             self.view.sort_state,
-            &self.resources.username_cache,
+            &self.resources.owner_resolver,
             &self.tree.expanded_pids,
         );
     }
@@ -174,7 +174,7 @@ impl AppState {
     pub(super) fn sort_current_processes(&mut self) {
         super::sort::sort_processes(
             self.view.sort_state,
-            &self.resources.username_cache,
+            &self.resources.owner_resolver,
             &mut self.data.snapshot.processes,
         );
     }
@@ -182,7 +182,7 @@ impl AppState {
     pub(super) fn sort_snapshot_processes(&self, processes: &mut [ProcessRow]) {
         super::sort::sort_processes(
             self.view.sort_state,
-            &self.resources.username_cache,
+            &self.resources.owner_resolver,
             processes,
         );
     }
@@ -263,10 +263,10 @@ pub(super) fn expanded_ancestor_pids(
     ancestors
 }
 
-pub(super) fn build_process_tree_state(
+pub(super) fn build_process_tree_state<L: OwnerNameResolver + ?Sized>(
     processes: &[ProcessRow],
     sort_state: SortState,
-    username_cache: &HashMap<u32, String>,
+    owner_lookup: &L,
     expanded_pids: &HashSet<i32>,
 ) -> ProcessTreeState {
     let len = processes.len();
@@ -279,9 +279,9 @@ pub(super) fn build_process_tree_state(
     let parents = build_parent_index(processes, &pid_to_index);
     let (mut roots, mut children) = build_tree_index(&parents, len);
 
-    sort_process_indexes(sort_state, username_cache, processes, &mut roots);
+    sort_process_indexes(sort_state, owner_lookup, processes, &mut roots);
     for child_indexes in &mut children {
-        sort_process_indexes(sort_state, username_cache, processes, child_indexes);
+        sort_process_indexes(sort_state, owner_lookup, processes, child_indexes);
     }
 
     let rows = build_visible_tree_rows(processes, &children, &expanded_pids, &parents, &roots);
@@ -312,16 +312,16 @@ fn retain_known_expanded_pids(
         .collect()
 }
 
-fn sort_process_indexes(
+fn sort_process_indexes<L: OwnerNameResolver + ?Sized>(
     sort_state: SortState,
-    username_cache: &HashMap<u32, String>,
+    owner_lookup: &L,
     processes: &[ProcessRow],
-    indexes: &mut Vec<usize>,
+    indexes: &mut [usize],
 ) {
     indexes.sort_by(|left, right| {
         compare_process_rows(
             sort_state,
-            username_cache,
+            owner_lookup,
             &processes[*left],
             &processes[*right],
         )
@@ -434,8 +434,17 @@ mod tests {
         TreeRow, ViewMode, build_parent_index, build_process_tree_state, expanded_ancestor_pids,
         selected_tree_visible_index, visible_row_entries,
     };
+    use crate::app::owners::OwnerNameResolver;
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
     use std::collections::{HashMap, HashSet};
+
+    struct TestOwnerLookup;
+
+    impl OwnerNameResolver for TestOwnerLookup {
+        fn owner_name(&self, uid: u32) -> String {
+            uid.to_string()
+        }
+    }
 
     fn tree_row(pid: i32, ppid: i32) -> ProcessRow {
         ProcessRow {
@@ -520,7 +529,7 @@ mod tests {
         let state = build_process_tree_state(
             &processes,
             SortState::new(SortKey::Pid, SortDirection::Ascending),
-            &HashMap::new(),
+            &TestOwnerLookup,
             &expanded,
         );
 
