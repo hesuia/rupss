@@ -123,8 +123,8 @@ mod tests {
     #[test]
     fn detail_request_is_empty_when_heavy_columns_hidden() {
         let mut app = AppState::new(ProcfsCollector::new());
-        assert!(app.view.column_visibility.toggle(ProcessColumn::Uss));
-        assert!(app.view.column_visibility.toggle(ProcessColumn::Pss));
+        assert!(app.view.columns.toggle(ProcessColumn::Uss));
+        assert!(app.view.columns.toggle(ProcessColumn::Pss));
 
         let request = app.detail_request();
         assert!(!request.needs_any());

@@ -1,4 +1,4 @@
-use super::{ColumnVisibility, HISTORY_CAPACITY, TreeRow, ViewMode, owners::OwnerNameCache};
+use super::{HISTORY_CAPACITY, TreeRow, ViewMode, columns::ColumnLayout, owners::OwnerNameCache};
 use crate::{
     collector::{CpuSample, ProcfsCollector},
     error::CollectorError,
@@ -40,7 +40,7 @@ pub(super) struct AppViewState {
     pub(super) view_mode: ViewMode,
     pub(super) viewport_rows: usize,
     pub(super) process_table_area: Option<Rect>,
-    pub(super) column_visibility: ColumnVisibility,
+    pub(super) columns: ColumnLayout,
     pub(super) column_picker_open: bool,
     pub(super) column_picker_index: usize,
 }
@@ -54,7 +54,7 @@ impl AppViewState {
             view_mode: ViewMode::Flat,
             viewport_rows: 20,
             process_table_area: None,
-            column_visibility: ColumnVisibility::new(),
+            columns: ColumnLayout::default(),
             column_picker_open: false,
             column_picker_index: 0,
         }

@@ -1,3 +1,4 @@
+mod columns;
 mod input;
 mod navigation;
 mod owners;
@@ -15,6 +16,7 @@ use crate::{
     error::CollectorError,
     snapshot::{ProcessRow, Snapshot, SortState, SystemSummary},
 };
+pub(crate) use columns::ProcessColumn;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use std::{io::Stdout, ops::Range, time::Duration};
 use strum::{AsRefStr, IntoStaticStr};
@@ -27,171 +29,7 @@ const HISTORY_CAPACITY: usize = 180;
 const TICK_RATE: Duration = Duration::from_secs(1);
 const EVENT_POLL: Duration = Duration::from_millis(250);
 pub(crate) const PROCESS_TABLE_COLUMN_SPACING: u16 = 1;
-const PROCESS_TABLE_COLUMN_WIDTHS_FLAT: [u16; ProcessColumn::ALL.len()] =
-    [7, 7, 12, 8, 24, 24, 12, 12, 12, 12, 8];
-const PROCESS_TABLE_COLUMN_WIDTHS_TREE: [u16; ProcessColumn::ALL.len()] =
-    [7, 7, 12, 8, 32, 16, 12, 12, 12, 12, 8];
 type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProcessColumn {
-    Pid,
-    Ppid,
-    Owner,
-    Thread,
-    Name,
-    Command,
-    Rss,
-    Uss,
-    Pss,
-    Swap,
-    Cpu,
-}
-
-impl ProcessColumn {
-    pub(crate) const ALL: [Self; 11] = [
-        Self::Pid,
-        Self::Ppid,
-        Self::Owner,
-        Self::Thread,
-        Self::Name,
-        Self::Command,
-        Self::Rss,
-        Self::Uss,
-        Self::Pss,
-        Self::Swap,
-        Self::Cpu,
-    ];
-
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            Self::Pid => "PID",
-            Self::Ppid => "PPID",
-            Self::Owner => "OWNER",
-            Self::Thread => "THREAD",
-            Self::Name => "NAME",
-            Self::Command => "COMMAND",
-            Self::Rss => "RSS",
-            Self::Uss => "USS",
-            Self::Pss => "PSS",
-            Self::Swap => "SWAP",
-            Self::Cpu => "CPU",
-        }
-    }
-
-    pub(crate) fn width(self, view_mode: ViewMode) -> u16 {
-        let widths = match view_mode {
-            ViewMode::Flat => PROCESS_TABLE_COLUMN_WIDTHS_FLAT,
-            ViewMode::Tree => PROCESS_TABLE_COLUMN_WIDTHS_TREE,
-        };
-        widths[self.index()]
-    }
-
-    pub(crate) const fn index(self) -> usize {
-        match self {
-            Self::Pid => 0,
-            Self::Ppid => 1,
-            Self::Owner => 2,
-            Self::Thread => 3,
-            Self::Name => 4,
-            Self::Command => 5,
-            Self::Rss => 6,
-            Self::Uss => 7,
-            Self::Pss => 8,
-            Self::Swap => 9,
-            Self::Cpu => 10,
-        }
-    }
-
-    pub(crate) fn from_sort_key(sort_key: crate::snapshot::SortKey) -> Option<Self> {
-        match sort_key {
-            crate::snapshot::SortKey::Pid => Some(Self::Pid),
-            crate::snapshot::SortKey::Ppid => Some(Self::Ppid),
-            crate::snapshot::SortKey::Owner => Some(Self::Owner),
-            crate::snapshot::SortKey::Name => Some(Self::Name),
-            crate::snapshot::SortKey::Command => Some(Self::Command),
-            crate::snapshot::SortKey::Rss => Some(Self::Rss),
-            crate::snapshot::SortKey::Swap => Some(Self::Swap),
-            crate::snapshot::SortKey::Cpu => Some(Self::Cpu),
-        }
-    }
-
-    pub(crate) fn is_toggleable(self) -> bool {
-        self != Self::Name
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ColumnVisibility {
-    order: [ProcessColumn; ProcessColumn::ALL.len()],
-    visible: [bool; ProcessColumn::ALL.len()],
-}
-
-impl ColumnVisibility {
-    pub(crate) fn new() -> Self {
-        Self {
-            order: ProcessColumn::ALL,
-            visible: [true; ProcessColumn::ALL.len()],
-        }
-    }
-
-    pub(crate) fn is_visible(&self, column: ProcessColumn) -> bool {
-        self.visible[column.index()]
-    }
-
-    pub(crate) fn ordered_columns(&self) -> &[ProcessColumn; ProcessColumn::ALL.len()] {
-        &self.order
-    }
-
-    pub(crate) fn visible_columns(&self) -> impl Iterator<Item = ProcessColumn> + '_ {
-        self.order
-            .into_iter()
-            .filter(|column| self.is_visible(*column))
-    }
-
-    pub(crate) fn column_at(&self, index: usize) -> Option<ProcessColumn> {
-        self.order.get(index).copied()
-    }
-
-    pub(crate) fn toggle(&mut self, column: ProcessColumn) -> bool {
-        if !column.is_toggleable() || self.visible_count() == 1 && self.is_visible(column) {
-            return false;
-        }
-
-        let index = column.index();
-        self.visible[index] = !self.visible[index];
-        true
-    }
-
-    pub(crate) fn visible_count(&self) -> usize {
-        self.visible.iter().filter(|visible| **visible).count()
-    }
-
-    pub(crate) fn move_column(&mut self, index: usize, delta: isize) -> Option<usize> {
-        let target = if delta < 0 {
-            index.checked_sub(delta.unsigned_abs())?
-        } else {
-            index.checked_add(delta as usize)?
-        };
-        if target >= self.order.len() {
-            return None;
-        }
-
-        self.order.swap(index, target);
-        Some(target)
-    }
-}
-
-pub(crate) fn process_table_columns(visibility: &ColumnVisibility) -> Vec<ProcessColumn> {
-    visibility.visible_columns().collect()
-}
-
-pub(crate) fn process_table_detail_request(visibility: &ColumnVisibility) -> VisibleDetailRequest {
-    VisibleDetailRequest {
-        uss: visibility.is_visible(ProcessColumn::Uss),
-        pss: visibility.is_visible(ProcessColumn::Pss),
-    }
-}
 
 /// Result of handling one key input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,7 +93,7 @@ impl AppState {
     }
 
     pub(crate) fn visible_columns(&self) -> Vec<ProcessColumn> {
-        process_table_columns(&self.view.column_visibility)
+        self.view.columns.visible_columns().collect()
     }
 
     pub(crate) fn is_column_picker_open(&self) -> bool {
@@ -266,8 +104,8 @@ impl AppState {
         self.view.column_picker_index
     }
 
-    pub(crate) fn column_picker_columns(&self) -> &[ProcessColumn; ProcessColumn::ALL.len()] {
-        self.view.column_visibility.ordered_columns()
+    pub(crate) fn column_picker_columns(&self) -> &[ProcessColumn] {
+        self.view.columns.ordered_columns()
     }
 
     pub fn system_summary(&self) -> &SystemSummary {
@@ -355,7 +193,7 @@ impl AppState {
     }
 
     pub(crate) fn detail_request(&self) -> VisibleDetailRequest {
-        process_table_detail_request(&self.view.column_visibility)
+        self.view.columns.detail_request()
     }
 }
 
@@ -367,7 +205,7 @@ impl Default for AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, ColumnVisibility, ProcessColumn, process_table_detail_request};
+    use super::AppState;
     use crate::collector::ProcfsCollector;
     use crate::error::CollectorError;
     use procfs::ProcError;
@@ -404,32 +242,5 @@ mod tests {
             app.last_error_message().as_deref(),
             Some("failed to enumerate /proc processes")
         );
-    }
-
-    #[test]
-    fn column_visibility_keeps_name_visible() {
-        let mut visibility = ColumnVisibility::new();
-
-        assert!(!visibility.toggle(ProcessColumn::Name));
-        assert!(visibility.is_visible(ProcessColumn::Name));
-    }
-
-    #[test]
-    fn detail_request_only_includes_visible_heavy_columns() {
-        let mut visibility = ColumnVisibility::new();
-        assert!(visibility.toggle(ProcessColumn::Uss));
-
-        let request = process_table_detail_request(&visibility);
-        assert!(!request.uss);
-        assert!(request.pss);
-    }
-
-    #[test]
-    fn column_visibility_can_reorder_columns() {
-        let mut visibility = ColumnVisibility::new();
-
-        assert_eq!(visibility.move_column(0, 1), Some(1));
-        assert_eq!(visibility.ordered_columns()[0], ProcessColumn::Ppid);
-        assert_eq!(visibility.ordered_columns()[1], ProcessColumn::Pid);
     }
 }

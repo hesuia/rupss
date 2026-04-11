@@ -252,7 +252,7 @@ impl AppState {
         self.view.column_picker_index = self
             .view
             .column_picker_index
-            .min(ProcessColumn::ALL.len().saturating_sub(1));
+            .min(self.view.columns.ordered_columns().len().saturating_sub(1));
     }
 
     fn close_overlay(&mut self) {
@@ -264,7 +264,7 @@ impl AppState {
             return;
         }
 
-        let len = ProcessColumn::ALL.len();
+        let len = self.view.columns.ordered_columns().len();
         let current = self.view.column_picker_index;
         let next = if delta < 0 {
             current.saturating_sub(delta.unsigned_abs())
@@ -280,14 +280,10 @@ impl AppState {
             return;
         }
 
-        let Some(column) = self
-            .view
-            .column_visibility
-            .column_at(self.view.column_picker_index)
-        else {
+        let Some(column) = self.view.columns.column_at(self.view.column_picker_index) else {
             return;
         };
-        if self.view.column_visibility.toggle(column) {
+        if self.view.columns.toggle(column) {
             self.ensure_sort_key_visible();
             self.populate_visible_details();
         }
@@ -300,8 +296,8 @@ impl AppState {
 
         if let Some(next_index) = self
             .view
-            .column_visibility
-            .move_column(self.view.column_picker_index, delta)
+            .columns
+            .move_in_order(self.view.column_picker_index, delta)
         {
             self.view.column_picker_index = next_index;
         }
@@ -311,7 +307,7 @@ impl AppState {
         let Some(sort_column) = ProcessColumn::from_sort_key(self.view.sort_state.key) else {
             return;
         };
-        if self.view.column_visibility.is_visible(sort_column) {
+        if self.view.columns.is_visible(sort_column) {
             return;
         }
 
@@ -782,11 +778,7 @@ mod tests {
 
         app.handle_key(key(KeyCode::Enter));
 
-        assert!(
-            !app.view
-                .column_visibility
-                .is_visible(super::ProcessColumn::Command)
-        );
+        assert!(!app.view.columns.is_visible(super::ProcessColumn::Command));
     }
 
     #[test]
