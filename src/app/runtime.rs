@@ -14,11 +14,10 @@ use std::{io, time::Instant};
 /// restored even when the loop exits due to user input.
 pub fn run() -> Result<(), AppError> {
     let mut terminal = setup_terminal()?;
-    let result = run_app(&mut terminal);
-    match restore_terminal(&mut terminal) {
-        Ok(()) => result,
-        Err(error) => Err(error),
-    }
+    run_app(&mut terminal)?;
+    restore_terminal(&mut terminal)?;
+
+    Ok(())
 }
 
 fn run_app(terminal: &mut CrosstermTerminal) -> Result<(), AppError> {
