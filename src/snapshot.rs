@@ -157,21 +157,10 @@ pub struct ProcessRow {
     pub uss_bytes: Option<u64>,
     /// Proportional set size in bytes, populated from `smaps_rollup` when visible.
     pub pss_bytes: Option<u64>,
-    /// Cheap swap estimate from `/proc/<pid>/status`, in bytes.
-    pub base_swap_bytes: u64,
-    /// Swap value from `smaps_rollup`, in bytes, when available.
-    pub detailed_swap_bytes: Option<u64>,
+    /// Swap usage from `/proc/<pid>/status`, in bytes.
+    pub swap_bytes: u64,
     /// CPU percentage calculated from two samples.
     pub cpu_percent: f32,
-}
-
-impl ProcessRow {
-    /// Returns the best swap value currently available for display.
-    ///
-    /// `smaps_rollup` data wins when it has already been loaded for this row.
-    pub fn visible_swap_bytes(&self) -> u64 {
-        self.detailed_swap_bytes.unwrap_or(self.base_swap_bytes)
-    }
 }
 
 /// Immutable view of one collection cycle.

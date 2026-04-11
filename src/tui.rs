@@ -204,7 +204,7 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             Cell::from(format_bytes(row.rss_bytes)),
             option_cell(row.uss_bytes),
             option_cell(row.pss_bytes),
-            Cell::from(format_bytes(row.visible_swap_bytes())),
+            Cell::from(format_bytes(row.swap_bytes)),
             Cell::from(format_percent(row.cpu_percent)),
         ])
         .style(style)

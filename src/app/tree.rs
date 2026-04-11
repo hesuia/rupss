@@ -448,8 +448,7 @@ mod tests {
             rss_bytes: pid as u64,
             uss_bytes: None,
             pss_bytes: None,
-            base_swap_bytes: 0,
-            detailed_swap_bytes: None,
+            swap_bytes: 0,
             cpu_percent: pid as f32,
         }
     }

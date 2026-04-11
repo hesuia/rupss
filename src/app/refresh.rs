@@ -54,7 +54,6 @@ impl AppState {
             if let Some(detail) = details.get(&row.pid) {
                 row.uss_bytes = detail.uss_bytes;
                 row.pss_bytes = detail.pss_bytes;
-                row.detailed_swap_bytes = detail.swap_bytes;
             }
         }
     }
@@ -85,8 +84,7 @@ mod tests {
             rss_bytes: pid as u64,
             uss_bytes: None,
             pss_bytes: Some(pid as u64),
-            base_swap_bytes: pid as u64,
-            detailed_swap_bytes: None,
+            swap_bytes: pid as u64,
             cpu_percent: pid as f32,
         }
     }

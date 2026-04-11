@@ -38,8 +38,6 @@ pub struct DetailedMemorySample {
     pub uss_bytes: Option<u64>,
     /// Proportional set size in bytes.
     pub pss_bytes: Option<u64>,
-    /// Swap usage reported by `smaps_rollup`, in bytes.
-    pub swap_bytes: Option<u64>,
 }
 
 /// Abstracts process and memory collection behind a swappable interface.
@@ -140,8 +138,7 @@ impl ProcfsCollector {
             rss_bytes,
             uss_bytes: None,
             pss_bytes: None,
-            base_swap_bytes: swap_bytes,
-            detailed_swap_bytes: None,
+            swap_bytes,
             cpu_percent,
         };
 
@@ -170,7 +167,7 @@ impl SystemCollector for ProcfsCollector {
                 (Vec::new(), HashMap::new(), 0u64, 0u64),
                 |(mut rows, mut cpu_cache, total_rss, total_swap), (row, cpu_sample)| {
                     let total_rss = total_rss.saturating_add(row.rss_bytes);
-                    let total_swap = total_swap.saturating_add(row.base_swap_bytes);
+                    let total_swap = total_swap.saturating_add(row.swap_bytes);
                     cpu_cache.insert(row.pid, cpu_sample);
                     rows.push(row);
                     (rows, cpu_cache, total_rss, total_swap)
@@ -229,7 +226,6 @@ impl SystemCollector for ProcfsCollector {
                     DetailedMemorySample {
                         uss_bytes: Some(uss_bytes),
                         pss_bytes: map.get("Pss").copied(),
-                        swap_bytes: map.get("Swap").copied(),
                     },
                 ))
             })

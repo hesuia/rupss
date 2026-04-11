@@ -263,9 +263,8 @@ mod tests {
             command: "cmd".to_string(),
             rss_bytes: pid as u64,
             uss_bytes: None,
-            pss_bytes: Some(pid as u64),
-            base_swap_bytes: pid as u64,
-            detailed_swap_bytes: None,
+            pss_bytes: Some(pid as u64), // Just for testing, we can have PSS equal to PID
+            swap_bytes: pid as u64,
             cpu_percent: pid as f32,
         }
     }
