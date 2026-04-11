@@ -421,8 +421,8 @@ fn build_visible_tree_rows(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, TreeRow, ViewMode, build_parent_index, build_process_tree_state,
-        expanded_ancestor_pids, selected_tree_visible_index, _visible_row_entries,
+        _visible_row_entries, AppState, TreeRow, ViewMode, build_parent_index,
+        build_process_tree_state, expanded_ancestor_pids, selected_tree_visible_index,
     };
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
     use crate::{app::owners::OwnerNameResolver, collector::ProcfsCollector};
