@@ -1,6 +1,6 @@
 use super::{
-    AppState, NAME_COLUMN_INDEX, PROCESS_TABLE_COLUMN_SPACING, ViewMode, owners::OwnerNameResolver,
-    process_table_column_widths, sort::compare_process_rows, state::ProcessTreeState,
+    AppState, PROCESS_TABLE_COLUMN_SPACING, ProcessColumn, ViewMode, owners::OwnerNameResolver,
+    sort::compare_process_rows, state::ProcessTreeState,
 };
 use crate::snapshot::{ProcessRow, SortState};
 use std::collections::{HashMap, HashSet};
@@ -141,15 +141,17 @@ impl AppState {
 
     pub(super) fn name_column_bounds(&self) -> Option<(u16, u16)> {
         let area = self.view.process_table_area?;
-        let column_widths = process_table_column_widths(self.view.view_mode);
         let mut start = area.x.saturating_add(1);
-        for width in column_widths.iter().take(NAME_COLUMN_INDEX) {
+        for column in self.visible_columns() {
+            if column == ProcessColumn::Name {
+                return Some((start, column.width(self.view.view_mode)));
+            }
             start = start
-                .saturating_add(*width)
+                .saturating_add(column.width(self.view.view_mode))
                 .saturating_add(PROCESS_TABLE_COLUMN_SPACING);
         }
 
-        Some((start, column_widths[NAME_COLUMN_INDEX]))
+        None
     }
 
     pub(super) fn rebuild_tree_rows(&mut self) {
@@ -426,8 +428,12 @@ mod tests {
     };
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
     use crate::{app::owners::OwnerNameResolver, collector::ProcfsCollector};
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::{HashMap, HashSet};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
 
     struct TestOwnerLookup;
 
@@ -543,7 +549,7 @@ mod tests {
             tree_row(4, 0),
         ];
         app.rebuild_tree_rows();
-        app.handle_key(KeyCode::Char('t'));
+        app.handle_key(key(KeyCode::Char('t')));
 
         let visible: Vec<i32> = app
             .visible_row_range()
@@ -561,9 +567,9 @@ mod tests {
         app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
         app.data.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 2)];
         app.rebuild_tree_rows();
-        app.handle_key(KeyCode::Char('t'));
+        app.handle_key(key(KeyCode::Char('t')));
 
-        app.handle_key(KeyCode::Right);
+        app.handle_key(key(KeyCode::Right));
         let visible_after_expand: Vec<i32> = app
             .visible_row_range()
             .filter_map(|visible_index| app.process_index_at_visible_row(visible_index))
@@ -571,7 +577,7 @@ mod tests {
             .collect();
         assert_eq!(visible_after_expand, vec![1, 2]);
 
-        app.handle_key(KeyCode::Left);
+        app.handle_key(key(KeyCode::Left));
         let visible_after_collapse: Vec<i32> = app
             .visible_row_range()
             .filter_map(|visible_index| app.process_index_at_visible_row(visible_index))
@@ -591,8 +597,8 @@ mod tests {
         child_b.rss_bytes = 50;
         app.data.snapshot.processes = vec![parent, child_a, child_b];
         app.rebuild_tree_rows();
-        app.handle_key(KeyCode::Char('t'));
-        app.handle_key(KeyCode::Right);
+        app.handle_key(key(KeyCode::Char('t')));
+        app.handle_key(key(KeyCode::Right));
 
         let visible: Vec<i32> = app
             .visible_row_range()
@@ -615,7 +621,7 @@ mod tests {
             tree_row(5, 1),
         ];
         app.rebuild_tree_rows();
-        app.handle_key(KeyCode::Char('t'));
+        app.handle_key(key(KeyCode::Char('t')));
 
         let visible: Vec<i32> = app
             .visible_row_range()
@@ -633,7 +639,7 @@ mod tests {
         app.data.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
         app.tree.expanded_pids.insert(1);
         app.rebuild_tree_rows();
-        app.handle_key(KeyCode::Char('t'));
+        app.handle_key(key(KeyCode::Char('t')));
 
         let child = app
             .visible_row_range()

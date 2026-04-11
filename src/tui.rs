@@ -1,5 +1,5 @@
 use crate::{
-    app::{AppState, ViewMode, process_table_column_widths},
+    app::{AppState, ProcessColumn, ViewMode},
     format::{format_bytes, format_option_bytes, format_percent},
 };
 use ratatui::{
@@ -8,8 +8,12 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Cell, Chart, Dataset, Paragraph, Row, Table},
+    widgets::{Axis, Block, Borders, Cell, Chart, Clear, Dataset, Paragraph, Row, Table},
 };
+
+const COLUMN_PICKER_BACKGROUND: Color = Color::Black;
+const COLUMN_PICKER_BORDER: Color = Color::Yellow;
+const COLUMN_PICKER_SELECTED_BACKGROUND: Color = Color::Blue;
 
 /// Draws the complete application frame.
 ///
@@ -36,6 +40,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     render_history_chart(frame, top[1], app, false);
     render_summary(frame, areas[1], app);
     render_process_table(frame, areas[2], app);
+    if app.is_column_picker_open() {
+        render_column_picker(frame, app);
+    }
 }
 
 fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: bool) {
@@ -168,10 +175,8 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     // The viewport height decides which rows are considered visible and therefore
     // which PIDs are eligible for `smaps_rollup` collection.
     app.set_viewport_rows(area.height.saturating_sub(3) as usize);
-    let header = Row::new([
-        "PID", "PPID", "OWNER", "THREAD", "NAME", "COMMAND", "RSS", "USS", "PSS", "SWAP", "CPU",
-    ])
-    .style(
+    let columns = app.visible_columns();
+    let header = Row::new(columns.iter().map(|column| Cell::from(column.title()))).style(
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -194,36 +199,110 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             (ViewMode::Tree, None) => row.name.clone(),
         };
 
-        Row::new(vec![
-            Cell::from(row.pid.to_string()),
-            Cell::from(row.ppid.to_string()),
-            Cell::from(app.owner_name(row.owner_uid)),
-            Cell::from(row.threads.to_string()),
-            Cell::from(name_cell),
-            Cell::from(row.command.clone()),
-            Cell::from(format_bytes(row.rss_bytes)),
-            option_cell(row.uss_bytes),
-            option_cell(row.pss_bytes),
-            Cell::from(format_bytes(row.swap_bytes)),
-            Cell::from(format_percent(row.cpu_percent)),
-        ])
+        Row::new(
+            columns
+                .iter()
+                .map(|column| process_table_cell(*column, row, &name_cell, app))
+                .collect::<Vec<_>>(),
+        )
         .style(style)
     });
 
     let table = Table::new(
         rows,
-        process_table_column_widths(app.view_mode()).map(Constraint::Length),
+        columns
+            .iter()
+            .map(|column| Constraint::Length(column.width(app.view_mode())))
+            .collect::<Vec<_>>(),
     )
     .header(header)
     .block(
         Block::default().title(
-                "Processes  q:quit  t:tree  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page  i/p/o/n/m/r/s/c:sort",
+                "Processes  q:quit  t:tree  v:columns  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page  i/p/o/n/m/r/s/c:sort",
             )
             .borders(Borders::ALL),
     )
     .column_spacing(crate::app::PROCESS_TABLE_COLUMN_SPACING);
 
     frame.render_widget(table, area);
+}
+
+fn process_table_cell(
+    column: ProcessColumn,
+    row: &crate::snapshot::ProcessRow,
+    name_cell: &str,
+    app: &AppState,
+) -> Cell<'static> {
+    match column {
+        ProcessColumn::Pid => Cell::from(row.pid.to_string()),
+        ProcessColumn::Ppid => Cell::from(row.ppid.to_string()),
+        ProcessColumn::Owner => Cell::from(app.owner_name(row.owner_uid)),
+        ProcessColumn::Thread => Cell::from(row.threads.to_string()),
+        ProcessColumn::Name => Cell::from(name_cell.to_owned()),
+        ProcessColumn::Command => Cell::from(row.command.clone()),
+        ProcessColumn::Rss => Cell::from(format_bytes(row.rss_bytes)),
+        ProcessColumn::Uss => option_cell(row.uss_bytes),
+        ProcessColumn::Pss => option_cell(row.pss_bytes),
+        ProcessColumn::Swap => Cell::from(format_bytes(row.swap_bytes)),
+        ProcessColumn::Cpu => Cell::from(format_percent(row.cpu_percent)),
+    }
+}
+
+fn render_column_picker(frame: &mut Frame<'_>, app: &AppState) {
+    let area = centered_rect(frame.area(), 36, 15);
+    frame.render_widget(Clear, area);
+    let visible_columns = app.visible_columns();
+    let rows = app
+        .column_picker_columns()
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let selected = index == app.column_picker_index();
+            let enabled = visible_columns.contains(column);
+            let toggle_mark = if enabled { "[x]" } else { "[ ]" };
+            let mut label = format!("{toggle_mark} {}", column.title());
+            if !column.is_toggleable() {
+                label.push_str(" (fixed)");
+            }
+            let style = if selected {
+                Style::default()
+                    .bg(COLUMN_PICKER_SELECTED_BACKGROUND)
+                    .fg(Color::White)
+            } else if enabled {
+                Style::default().bg(COLUMN_PICKER_BACKGROUND)
+            } else {
+                Style::default()
+                    .bg(COLUMN_PICKER_BACKGROUND)
+                    .fg(Color::DarkGray)
+            };
+            Row::new(vec![Cell::from(label)]).style(style)
+        });
+
+    let table = Table::new(rows, [Constraint::Min(28)])
+        .block(
+            Block::default()
+                .title("Columns  j/k:select  Shift+Up/Down or J/K:move  Enter/Space:toggle  Esc/v:close")
+                .borders(Borders::ALL)
+                .style(Style::default().bg(COLUMN_PICKER_BACKGROUND))
+                .border_style(Style::default().fg(COLUMN_PICKER_BORDER))
+                .title_style(
+                    Style::default()
+                        .fg(COLUMN_PICKER_BORDER)
+                        .bg(COLUMN_PICKER_BACKGROUND)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
+        .column_spacing(0);
+
+    frame.render_widget(table, area);
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let popup_width = width.min(area.width.saturating_sub(2)).max(1);
+    let popup_height = height.min(area.height.saturating_sub(2)).max(1);
+    let x = area.x + area.width.saturating_sub(popup_width) / 2;
+    let y = area.y + area.height.saturating_sub(popup_height) / 2;
+    Rect::new(x, y, popup_width, popup_height)
 }
 
 /// Styles an optional byte value for display in the process table.
@@ -264,8 +343,16 @@ fn format_tree_name(entry: &crate::app::TreeRow, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{chart_y_upper_bound, format_tree_name};
-    use crate::app::TreeRow;
+    use super::{
+        COLUMN_PICKER_BACKGROUND, centered_rect, chart_y_upper_bound, format_tree_name, render,
+    };
+    use crate::{app::TreeRow, collector::ProcfsCollector};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
 
     #[test]
     fn chart_upper_bound_uses_total_when_non_zero() {
@@ -315,5 +402,29 @@ mod tests {
 
         assert_eq!(format_tree_name(&parent, "bash"), "│  ├─[+] bash");
         assert_eq!(format_tree_name(&leaf, "worker"), "│     └─ worker");
+    }
+
+    #[test]
+    fn centered_rect_stays_within_frame() {
+        assert_eq!(
+            centered_rect(Rect::new(0, 0, 20, 8), 36, 15),
+            Rect::new(1, 1, 18, 6)
+        );
+    }
+
+    #[test]
+    fn column_picker_clears_background_from_selected_row() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = crate::app::AppState::new(ProcfsCollector::new());
+        app.handle_key(key(KeyCode::Char('v')));
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let area = centered_rect(Rect::new(0, 0, 80, 24), 36, 15);
+        let sample = buffer.cell((area.x + 2, area.y + 2)).unwrap();
+
+        assert_eq!(sample.style().bg, Some(COLUMN_PICKER_BACKGROUND));
     }
 }

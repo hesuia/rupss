@@ -42,14 +42,15 @@ impl AppState {
 
     pub(super) fn populate_visible_details(&mut self) {
         let pids = self.visible_pids();
-        if pids.is_empty() {
+        let request = self.detail_request();
+        if pids.is_empty() || !request.needs_any() {
             return;
         }
 
         let details = self
             .resources
             .collector
-            .collect_visible_memory_details(&pids);
+            .collect_visible_memory_details(&pids, request);
         for row in &mut self.data.snapshot.processes {
             if let Some(detail) = details.get(&row.pid) {
                 row.uss_bytes = detail.uss_bytes;
@@ -70,6 +71,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::AppState;
+    use crate::app::ProcessColumn;
     use crate::collector::ProcfsCollector;
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
 
@@ -116,5 +118,15 @@ mod tests {
         app.view.viewport_rows = 3;
 
         assert_eq!(app.visible_pids(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn detail_request_is_empty_when_heavy_columns_hidden() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        assert!(app.view.column_visibility.toggle(ProcessColumn::Uss));
+        assert!(app.view.column_visibility.toggle(ProcessColumn::Pss));
+
+        let request = app.detail_request();
+        assert!(!request.needs_any());
     }
 }

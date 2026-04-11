@@ -34,7 +34,7 @@ fn run_app(terminal: &mut CrosstermTerminal) -> Result<(), AppError> {
             match event::read().map_err(AppError::ReadEvent)? {
                 Event::Key(key) => {
                     if matches!(key.kind, KeyEventKind::Press) {
-                        match app.handle_key(key.code) {
+                        match app.handle_key(key) {
                             KeyAction::Quit => return Ok(()),
                             KeyAction::Continue => {}
                         }
