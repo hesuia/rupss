@@ -20,7 +20,7 @@ use std::{io::Stdout, ops::Range, time::Duration};
 use strum::{AsRefStr, IntoStaticStr};
 pub(crate) use tree::TreeRow;
 
-use self::owners::OwnerNameResolverImpl;
+use self::owners::{OwnerNameCache, OwnerNameResolver};
 use self::state::{AppDataState, AppResources, AppViewState, ProcessTreeState};
 
 const HISTORY_CAPACITY: usize = 180;
@@ -84,7 +84,7 @@ impl AppState {
             data: AppDataState::new(),
             view: AppViewState::new(),
             tree: ProcessTreeState::new(),
-            resources: AppResources::new(collector, OwnerNameResolverImpl::new()),
+            resources: AppResources::new(collector, OwnerNameCache::new()),
         }
     }
 

@@ -179,7 +179,7 @@ impl AppState {
 }
 
 impl TreeRow {
-    fn flat(process_index: usize) -> Self {
+    fn _flat(process_index: usize) -> Self {
         Self {
             process_index,
             depth: 0,
@@ -204,7 +204,7 @@ impl TreeRow {
     }
 }
 
-pub(super) fn visible_row_entries(
+pub(super) fn _visible_row_entries(
     view_mode: ViewMode,
     scroll_offset: usize,
     viewport_rows: usize,
@@ -216,7 +216,7 @@ pub(super) fn visible_row_entries(
             let end = scroll_offset
                 .saturating_add(viewport_rows)
                 .min(process_count);
-            (scroll_offset.min(end)..end).map(TreeRow::flat).collect()
+            (scroll_offset.min(end)..end).map(TreeRow::_flat).collect()
         }
         ViewMode::Tree => {
             let end = scroll_offset
@@ -422,7 +422,7 @@ fn build_visible_tree_rows(
 mod tests {
     use super::{
         AppState, TreeRow, ViewMode, build_parent_index, build_process_tree_state,
-        expanded_ancestor_pids, selected_tree_visible_index, visible_row_entries,
+        expanded_ancestor_pids, selected_tree_visible_index, _visible_row_entries,
     };
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
     use crate::{app::owners::OwnerNameResolver, collector::ProcfsCollector};
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn visible_row_entries_slices_flat_rows() {
-        let rows = visible_row_entries(ViewMode::Flat, 1, 2, 5, &[]);
+        let rows = _visible_row_entries(ViewMode::Flat, 1, 2, 5, &[]);
         let indexes: Vec<usize> = rows.into_iter().map(|row| row.process_index).collect();
         assert_eq!(indexes, vec![1, 2]);
     }
