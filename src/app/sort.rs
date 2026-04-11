@@ -50,3 +50,92 @@ pub(super) fn sort_processes<L: OwnerNameResolver + ?Sized>(
 ) {
     processes.sort_by(|left, right| compare_process_rows(sort_state, owner_lookup, left, right));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::compare_process_rows;
+    use crate::app::owners::OwnerNameResolver;
+    use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
+    use std::collections::HashMap;
+
+    struct TestOwnerLookup {
+        owners: HashMap<u32, String>,
+    }
+
+    impl OwnerNameResolver for TestOwnerLookup {
+        fn owner_name(&self, uid: u32) -> String {
+            self.owners
+                .get(&uid)
+                .cloned()
+                .unwrap_or_else(|| uid.to_string())
+        }
+    }
+
+    fn sample_row(pid: i32) -> ProcessRow {
+        ProcessRow {
+            pid,
+            ppid: 1,
+            owner_uid: 0,
+            threads: 1,
+            name: "name".to_string(),
+            command: "cmd".to_string(),
+            rss_bytes: pid as u64,
+            uss_bytes: None,
+            pss_bytes: Some(pid as u64),
+            base_swap_bytes: pid as u64,
+            detailed_swap_bytes: None,
+            cpu_percent: pid as f32,
+        }
+    }
+
+    #[test]
+    fn sort_prefers_highest_metric() {
+        let owners = TestOwnerLookup {
+            owners: HashMap::new(),
+        };
+        let ordering = compare_process_rows(
+            SortState::new(SortKey::Cpu, SortDirection::Descending),
+            &owners,
+            &sample_row(10),
+            &sample_row(20),
+        );
+        assert_eq!(ordering, std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn sort_by_pid_is_ascending() {
+        let owners = TestOwnerLookup {
+            owners: HashMap::new(),
+        };
+        let ordering = compare_process_rows(
+            SortState::new(SortKey::Pid, SortDirection::Ascending),
+            &owners,
+            &sample_row(10),
+            &sample_row(20),
+        );
+        assert_eq!(ordering, std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn sort_by_owner_is_case_insensitive() {
+        let mut owner_names = HashMap::new();
+        owner_names.insert(1000, "Alice".to_string());
+        owner_names.insert(1001, "bob".to_string());
+        let owners = TestOwnerLookup {
+            owners: owner_names,
+        };
+
+        let mut left = sample_row(10);
+        left.owner_uid = 1000;
+        let mut right = sample_row(20);
+        right.owner_uid = 1001;
+
+        let ordering = compare_process_rows(
+            SortState::new(SortKey::Owner, SortDirection::Ascending),
+            &owners,
+            &left,
+            &right,
+        );
+        assert_eq!(ordering, std::cmp::Ordering::Less);
+    }
+}

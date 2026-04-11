@@ -177,19 +177,21 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let visible_rows = app.visible_row_entries();
-    let rows = visible_rows.iter().enumerate().map(|(visible_idx, entry)| {
-        let row = app
-            .process_row(entry.process_index)
+    let selected_visible_index = app.selected_visible_index();
+    let rows = app.visible_row_range().map(|visible_index| {
+        let process_index = app
+            .process_index_at_visible_row(visible_index)
             .expect("visible row exists");
-        let style = if app.selected_visible_index() == Some(app.scroll_offset() + visible_idx) {
+        let row = app.process_row(process_index).expect("visible row exists");
+        let style = if selected_visible_index == Some(visible_index) {
             Style::default().bg(Color::DarkGray).fg(Color::White)
         } else {
             Style::default()
         };
-        let name_cell = match app.view_mode() {
-            ViewMode::Flat => row.name.clone(),
-            ViewMode::Tree => format_tree_name(entry, &row.name),
+        let name_cell = match (app.view_mode(), app.tree_row_at_visible_row(visible_index)) {
+            (ViewMode::Flat, _) => row.name.clone(),
+            (ViewMode::Tree, Some(tree_row)) => format_tree_name(tree_row, &row.name),
+            (ViewMode::Tree, None) => row.name.clone(),
         };
 
         Row::new(vec![

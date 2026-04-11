@@ -17,16 +17,6 @@ pub(crate) struct TreeRow {
 }
 
 impl AppState {
-    pub(crate) fn visible_row_entries(&self) -> Vec<TreeRow> {
-        visible_row_entries(
-            self.view.view_mode,
-            self.view.scroll_offset,
-            self.view.viewport_rows,
-            self.data.snapshot.processes.len(),
-            &self.tree.rows,
-        )
-    }
-
     pub fn total_visible_rows(&self) -> usize {
         match self.view.view_mode {
             ViewMode::Flat => self.data.snapshot.processes.len(),
@@ -431,11 +421,12 @@ fn build_visible_tree_rows(
 #[cfg(test)]
 mod tests {
     use super::{
-        TreeRow, ViewMode, build_parent_index, build_process_tree_state, expanded_ancestor_pids,
-        selected_tree_visible_index, visible_row_entries,
+        AppState, TreeRow, ViewMode, build_parent_index, build_process_tree_state,
+        expanded_ancestor_pids, selected_tree_visible_index, visible_row_entries,
     };
-    use crate::app::owners::OwnerNameResolver;
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
+    use crate::{app::owners::OwnerNameResolver, collector::ProcfsCollector};
+    use crossterm::event::KeyCode;
     use std::collections::{HashMap, HashSet};
 
     struct TestOwnerLookup;
@@ -540,5 +531,132 @@ mod tests {
             .map(|row| processes[row.process_index].pid)
             .collect();
         assert_eq!(visible, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn tree_mode_starts_with_roots_only() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![
+            tree_row(1, 0),
+            tree_row(2, 1),
+            tree_row(3, 1),
+            tree_row(4, 0),
+        ];
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+
+        let visible: Vec<i32> = app
+            .visible_row_range()
+            .filter_map(|visible_index| app.process_index_at_visible_row(visible_index))
+            .map(|index| app.data.snapshot.processes[index].pid)
+            .collect();
+
+        assert_eq!(app.view.view_mode, ViewMode::Tree);
+        assert_eq!(visible, vec![1, 4]);
+    }
+
+    #[test]
+    fn tree_right_expands_and_left_collapses() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 2)];
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+
+        app.handle_key(KeyCode::Right);
+        let visible_after_expand: Vec<i32> = app
+            .visible_row_range()
+            .filter_map(|visible_index| app.process_index_at_visible_row(visible_index))
+            .map(|index| app.data.snapshot.processes[index].pid)
+            .collect();
+        assert_eq!(visible_after_expand, vec![1, 2]);
+
+        app.handle_key(KeyCode::Left);
+        let visible_after_collapse: Vec<i32> = app
+            .visible_row_range()
+            .filter_map(|visible_index| app.process_index_at_visible_row(visible_index))
+            .map(|index| app.data.snapshot.processes[index].pid)
+            .collect();
+        assert_eq!(visible_after_collapse, vec![1]);
+    }
+
+    #[test]
+    fn tree_sort_reorders_siblings_without_breaking_hierarchy() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        let mut parent = tree_row(1, 0);
+        parent.rss_bytes = 100;
+        let mut child_a = tree_row(2, 1);
+        child_a.rss_bytes = 10;
+        let mut child_b = tree_row(3, 1);
+        child_b.rss_bytes = 50;
+        app.data.snapshot.processes = vec![parent, child_a, child_b];
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+        app.handle_key(KeyCode::Right);
+
+        let visible: Vec<i32> = app
+            .visible_row_range()
+            .filter_map(|visible_index| app.process_index_at_visible_row(visible_index))
+            .map(|index| app.data.snapshot.processes[index].pid)
+            .collect();
+
+        assert_eq!(visible, vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn tree_mode_keeps_multiple_unresolved_roots_visible() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![
+            tree_row(1, 0),
+            tree_row(2, 9999),
+            tree_row(3, -1),
+            tree_row(4, 4),
+            tree_row(5, 1),
+        ];
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+
+        let visible: Vec<i32> = app
+            .visible_row_range()
+            .filter_map(|visible_index| app.process_index_at_visible_row(visible_index))
+            .map(|index| app.data.snapshot.processes[index].pid)
+            .collect();
+
+        assert_eq!(visible, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn tree_child_of_non_last_root_tracks_root_vertical_guide() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.data.snapshot.processes = vec![tree_row(1, 0), tree_row(2, 1), tree_row(3, 0)];
+        app.tree.expanded_pids.insert(1);
+        app.rebuild_tree_rows();
+        app.handle_key(KeyCode::Char('t'));
+
+        let child = app
+            .visible_row_range()
+            .filter_map(|visible_index| app.tree_row_at_visible_row(visible_index))
+            .find(|row| app.data.snapshot.processes[row.process_index].pid == 2)
+            .unwrap();
+
+        assert_eq!(child.ancestor_has_next_sibling, vec![true]);
+    }
+
+    #[test]
+    fn root_tree_toggle_starts_at_name_column() {
+        let row = TreeRow {
+            process_index: 0,
+            depth: 0,
+            has_children: true,
+            expanded: false,
+            parent_index: None,
+            is_last_sibling: false,
+            ancestor_has_next_sibling: Vec::new(),
+        };
+
+        assert_eq!(row.name_toggle_range(), Some((0, 3)));
     }
 }
