@@ -1,8 +1,8 @@
 use crate::{app::ViewMode, collector::VisibleDetailRequest};
+use strum::{EnumCount, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
-const COLUMN_COUNT: usize = 11;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumCount, EnumIter, EnumString, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum ProcessColumn {
     Pid,
     Ppid,
@@ -18,51 +18,12 @@ pub(crate) enum ProcessColumn {
 }
 
 impl ProcessColumn {
-    pub(crate) const ALL: [Self; COLUMN_COUNT] = [
-        Self::Pid,
-        Self::Ppid,
-        Self::Owner,
-        Self::Thread,
-        Self::Name,
-        Self::Command,
-        Self::Rss,
-        Self::Uss,
-        Self::Pss,
-        Self::Swap,
-        Self::Cpu,
-    ];
-
-    pub(crate) fn id(&self) -> &'static str {
-        match self {
-            Self::Pid => "pid",
-            Self::Ppid => "ppid",
-            Self::Owner => "owner",
-            Self::Thread => "thread",
-            Self::Name => "name",
-            Self::Command => "command",
-            Self::Rss => "rss",
-            Self::Uss => "uss",
-            Self::Pss => "pss",
-            Self::Swap => "swap",
-            Self::Cpu => "cpu",
-        }
+    pub(crate) fn id(self) -> &'static str {
+        self.into()
     }
 
     pub(crate) fn try_from_id(id: &str) -> Option<Self> {
-        match id {
-            "pid" => Some(Self::Pid),
-            "ppid" => Some(Self::Ppid),
-            "owner" => Some(Self::Owner),
-            "thread" => Some(Self::Thread),
-            "name" => Some(Self::Name),
-            "command" => Some(Self::Command),
-            "rss" => Some(Self::Rss),
-            "uss" => Some(Self::Uss),
-            "pss" => Some(Self::Pss),
-            "swap" => Some(Self::Swap),
-            "cpu" => Some(Self::Cpu),
-            _ => None,
-        }
+        id.parse().ok()
     }
 
     pub(crate) fn title(self) -> &'static str {
@@ -158,10 +119,7 @@ impl Default for ColumnConfigV1 {
     fn default() -> Self {
         Self {
             version: 1,
-            order: ProcessColumn::ALL
-                .into_iter()
-                .map(|c| c.id().to_string())
-                .collect(),
+            order: ProcessColumn::iter().map(|c| c.id().to_string()).collect(),
             hidden: Vec::new(),
         }
     }
@@ -170,7 +128,7 @@ impl Default for ColumnConfigV1 {
 #[derive(Debug, Clone)]
 pub(crate) struct ColumnLayout {
     order: Vec<ProcessColumn>,
-    visible: [bool; COLUMN_COUNT],
+    visible: [bool; ProcessColumn::COUNT],
 }
 
 impl Default for ColumnLayout {
@@ -182,8 +140,8 @@ impl Default for ColumnLayout {
 impl ColumnLayout {
     pub(crate) fn new_default() -> Self {
         Self {
-            order: ProcessColumn::ALL.to_vec(),
-            visible: [true; COLUMN_COUNT],
+            order: ProcessColumn::iter().collect(),
+            visible: [true; ProcessColumn::COUNT],
         }
     }
 
@@ -245,7 +203,7 @@ impl ColumnLayout {
     pub(crate) fn from_config(config: &ColumnConfigV1) -> Self {
         let mut layout = Self {
             order: Vec::new(),
-            visible: [true; COLUMN_COUNT],
+            visible: [true; ProcessColumn::COUNT],
         };
         layout.apply_config(config);
         layout
@@ -256,8 +214,7 @@ impl ColumnLayout {
         ColumnConfigV1 {
             version: 1,
             order: self.order.iter().map(|c| c.id().to_string()).collect(),
-            hidden: ProcessColumn::ALL
-                .into_iter()
+            hidden: ProcessColumn::iter()
                 .filter(|column| !self.is_visible(*column))
                 .map(|column| column.id().to_string())
                 .collect(),
@@ -266,7 +223,7 @@ impl ColumnLayout {
 
     fn apply_config(&mut self, config: &ColumnConfigV1) {
         // Order: keep only known columns, remove duplicates, then append missing defaults.
-        let mut seen = [false; COLUMN_COUNT];
+        let mut seen = [false; ProcessColumn::COUNT];
         for id in &config.order {
             let Some(column) = ProcessColumn::try_from_id(id) else {
                 continue;
@@ -277,14 +234,14 @@ impl ColumnLayout {
             seen[column.index()] = true;
             self.order.push(column);
         }
-        for column in ProcessColumn::ALL {
+        for column in ProcessColumn::iter() {
             if !seen[column.index()] {
                 self.order.push(column);
             }
         }
 
         // Visibility: start from all visible, then apply hidden list.
-        self.visible = [true; COLUMN_COUNT];
+        self.visible = [true; ProcessColumn::COUNT];
         for id in &config.hidden {
             let Some(column) = ProcessColumn::try_from_id(id) else {
                 continue;
@@ -307,6 +264,7 @@ impl ColumnLayout {
 #[cfg(test)]
 mod tests {
     use super::{ColumnConfigV1, ColumnLayout, ProcessColumn};
+    use strum::{EnumCount, IntoEnumIterator};
 
     #[test]
     fn config_sanitizes_unknown_and_duplicates_and_missing() {
@@ -319,7 +277,7 @@ mod tests {
 
         assert_eq!(layout.ordered_columns()[0], ProcessColumn::Pid);
         assert_eq!(layout.ordered_columns()[1], ProcessColumn::Name);
-        assert_eq!(layout.ordered_columns().len(), ProcessColumn::ALL.len());
+        assert_eq!(layout.ordered_columns().len(), ProcessColumn::COUNT);
     }
 
     #[test]
@@ -339,10 +297,7 @@ mod tests {
         let config = ColumnConfigV1 {
             version: 1,
             order: vec![],
-            hidden: ProcessColumn::ALL
-                .into_iter()
-                .map(|c| c.id().to_string())
-                .collect(),
+            hidden: ProcessColumn::iter().map(|c| c.id().to_string()).collect(),
         };
         let layout = ColumnLayout::from_config(&config);
 
