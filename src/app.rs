@@ -93,7 +93,7 @@ impl AppState {
     }
 
     pub(crate) fn visible_columns(&self) -> Vec<ProcessColumn> {
-        self.view.columns.visible_columns().collect()
+        self.view.columns.visible_columns()
     }
 
     pub(crate) fn is_column_picker_open(&self) -> bool {

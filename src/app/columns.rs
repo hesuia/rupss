@@ -18,7 +18,7 @@ pub(crate) enum ProcessColumn {
 }
 
 impl ProcessColumn {
-    pub(crate) fn id(self) -> &'static str {
+    pub(crate) fn id(&self) -> &'static str {
         self.into()
     }
 
@@ -26,7 +26,7 @@ impl ProcessColumn {
         id.parse().ok()
     }
 
-    pub(crate) fn title(self) -> &'static str {
+    pub(crate) fn title(&self) -> &'static str {
         match self {
             Self::Pid => "PID",
             Self::Ppid => "PPID",
@@ -42,7 +42,7 @@ impl ProcessColumn {
         }
     }
 
-    pub(crate) const fn index(self) -> usize {
+    pub(crate) const fn index(&self) -> usize {
         match self {
             Self::Pid => 0,
             Self::Ppid => 1,
@@ -58,7 +58,7 @@ impl ProcessColumn {
         }
     }
 
-    pub(crate) fn width(self, view_mode: ViewMode) -> u16 {
+    pub(crate) fn width(&self, view_mode: ViewMode) -> u16 {
         match view_mode {
             ViewMode::Flat => match self {
                 Self::Pid => 7,
@@ -89,8 +89,8 @@ impl ProcessColumn {
         }
     }
 
-    pub(crate) fn is_toggleable(self) -> bool {
-        self != Self::Name
+    pub(crate) fn is_toggleable(&self) -> bool {
+        self != &Self::Name
     }
 
     pub(crate) fn from_sort_key(sort_key: crate::snapshot::SortKey) -> Option<Self> {
@@ -157,11 +157,12 @@ impl ColumnLayout {
         self.visible[column.index()]
     }
 
-    pub(crate) fn visible_columns(&self) -> impl Iterator<Item = ProcessColumn> + '_ {
+    pub(crate) fn visible_columns(&self) -> Vec<ProcessColumn> {
         self.order
             .iter()
             .copied()
-            .filter(|column| self.is_visible(*column))
+            .filter(|&column| self.is_visible(column))
+            .collect()
     }
 
     pub(crate) fn visible_count(&self) -> usize {
