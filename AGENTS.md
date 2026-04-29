@@ -39,6 +39,7 @@ Lightweight and efficient, it collects data from `/proc` and renders it in a ter
 - Prefer explicit error handling over panics: use `Result`/`Option` + `?`; avoid `unwrap()`/`expect()` outside tests.
 - Keep module boundaries sharp: `/proc` parsing in `collector`, rendering in `tui`, UI logic in `app/`.
 - Naming follows Rust conventions: `CamelCase` types, `snake_case` functions/vars, `SCREAMING_SNAKE_CASE` constants.
+- Add doc comments (`///`) to public items and complex logic; internal helper functions can have inline comments as needed.
 
 ## rust coding conventions:
 - Use `Result<T, E>` and `Option<T>` (+ `?`) for error handling and optional values instead of panicking.
