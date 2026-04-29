@@ -15,12 +15,6 @@ impl OwnerNameCache {
             cache: UsersCache::new(),
         }
     }
-
-    fn lookup_owner_name(&self, uid: u32) -> Option<String> {
-        self.cache
-            .get_user_by_uid(uid)
-            .map(|user| user.name().to_string_lossy().into_owned())
-    }
 }
 
 impl Default for OwnerNameCache {
@@ -31,7 +25,9 @@ impl Default for OwnerNameCache {
 
 impl OwnerNameResolver for OwnerNameCache {
     fn owner_name(&self, uid: u32) -> String {
-        self.lookup_owner_name(uid)
+        self.cache
+            .get_user_by_uid(uid)
+            .map(|user| user.name().to_string_lossy().into_owned())
             .unwrap_or_else(|| uid.to_string())
     }
 }
