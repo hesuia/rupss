@@ -14,12 +14,12 @@ pub use runtime::run;
 use crate::{
     collector::{ProcfsCollector, VisibleDetailRequest},
     error::CollectorError,
-    snapshot::{ProcessRow, Snapshot, SortState, SystemSummary},
+    snapshot::{ProcessRow, Snapshot, SortKey, SortState, SystemSummary},
 };
 pub(crate) use columns::ProcessColumn;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use std::{io::Stdout, ops::Range, time::Duration};
-use strum::{AsRefStr, IntoStaticStr};
+use strum::{AsRefStr, IntoEnumIterator, IntoStaticStr};
 pub(crate) use tree::TreeRow;
 
 use self::owners::{OwnerNameCache, OwnerNameResolver};
@@ -100,12 +100,24 @@ impl AppState {
         self.view.column_picker_open
     }
 
+    pub(crate) fn is_sort_picker_open(&self) -> bool {
+        self.view.sort_picker_open
+    }
+
     pub(crate) fn column_picker_index(&self) -> usize {
         self.view.column_picker_index
     }
 
     pub(crate) fn column_picker_columns(&self) -> &[ProcessColumn] {
         self.view.columns.ordered_columns()
+    }
+
+    pub(crate) fn sort_picker_index(&self) -> usize {
+        self.view.sort_picker_index
+    }
+
+    pub(crate) fn sort_picker_keys(&self) -> Vec<SortKey> {
+        SortKey::iter().collect()
     }
 
     pub fn system_summary(&self) -> &SystemSummary {

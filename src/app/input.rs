@@ -7,6 +7,7 @@ use super::{
 };
 use crate::snapshot::{SortDirection, SortKey, SortState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use strum::IntoEnumIterator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppCommand {
@@ -17,11 +18,13 @@ enum AppCommand {
     TreeRight,
     ToggleViewMode,
     ToggleColumnPicker,
+    ToggleSortPicker,
     MoveColumnPicker(isize),
+    MoveSortPicker(isize),
     ReorderSelectedColumn(isize),
     ToggleSelectedColumn,
+    ApplySelectedSort,
     CloseOverlay,
-    Resort(SortKey),
     Noop,
 }
 
@@ -36,6 +39,7 @@ impl AppState {
             key,
             self.view.viewport_rows,
             self.view.column_picker_open,
+            self.view.sort_picker_open,
         ))
     }
 
@@ -60,8 +64,16 @@ impl AppState {
                 self.toggle_column_picker();
                 KeyAction::Continue
             }
+            AppCommand::ToggleSortPicker => {
+                self.toggle_sort_picker();
+                KeyAction::Continue
+            }
             AppCommand::MoveColumnPicker(delta) => {
                 self.move_column_picker(delta);
+                KeyAction::Continue
+            }
+            AppCommand::MoveSortPicker(delta) => {
+                self.move_sort_picker(delta);
                 KeyAction::Continue
             }
             AppCommand::ReorderSelectedColumn(delta) => {
@@ -72,11 +84,11 @@ impl AppState {
                 self.toggle_selected_column();
                 KeyAction::Continue
             }
+            AppCommand::ApplySelectedSort => self.apply_selected_sort_and_continue(),
             AppCommand::CloseOverlay => {
                 self.close_overlay();
                 KeyAction::Continue
             }
-            AppCommand::Resort(sort_key) => self.resort_and_continue(sort_key),
             AppCommand::Noop => KeyAction::Continue,
         }
     }
@@ -139,8 +151,10 @@ impl AppState {
         );
     }
 
-    fn resort_and_continue(&mut self, sort_key: SortKey) -> KeyAction {
-        self.resort(sort_key);
+    fn apply_selected_sort_and_continue(&mut self) -> KeyAction {
+        if let Some(sort_key) = self.selected_sort_key() {
+            self.resort(sort_key);
+        }
         KeyAction::Continue
     }
 
@@ -249,14 +263,26 @@ impl AppState {
 
     fn toggle_column_picker(&mut self) {
         self.view.column_picker_open = !self.view.column_picker_open;
+        if self.view.column_picker_open {
+            self.view.sort_picker_open = false;
+        }
         self.view.column_picker_index = self
             .view
             .column_picker_index
             .min(self.view.columns.ordered_columns().len().saturating_sub(1));
     }
 
+    fn toggle_sort_picker(&mut self) {
+        self.view.sort_picker_open = !self.view.sort_picker_open;
+        if self.view.sort_picker_open {
+            self.view.column_picker_open = false;
+            self.view.sort_picker_index = sort_key_index(self.view.sort_state.key);
+        }
+    }
+
     fn close_overlay(&mut self) {
         self.view.column_picker_open = false;
+        self.view.sort_picker_open = false;
     }
 
     fn move_column_picker(&mut self, delta: isize) {
@@ -273,6 +299,22 @@ impl AppState {
         }
         .min(len.saturating_sub(1));
         self.view.column_picker_index = next;
+    }
+
+    fn move_sort_picker(&mut self, delta: isize) {
+        if !self.view.sort_picker_open {
+            return;
+        }
+
+        self.view.sort_picker_index = moved_index(
+            self.view.sort_picker_index,
+            delta,
+            SortKey::iter().count().saturating_sub(1),
+        );
+    }
+
+    fn selected_sort_key(&self) -> Option<SortKey> {
+        SortKey::iter().nth(self.view.sort_picker_index)
     }
 
     fn toggle_selected_column(&mut self) {
@@ -319,13 +361,19 @@ impl AppState {
     }
 }
 
-fn key_command(key: KeyEvent, viewport_rows: usize, column_picker_open: bool) -> AppCommand {
+fn key_command(
+    key: KeyEvent,
+    viewport_rows: usize,
+    column_picker_open: bool,
+    sort_picker_open: bool,
+) -> AppCommand {
     let code = key.code;
     if column_picker_open {
         return match code {
             KeyCode::Char('q') => AppCommand::Quit,
             KeyCode::Esc => AppCommand::CloseOverlay,
             KeyCode::Char('v') => AppCommand::ToggleColumnPicker,
+            KeyCode::Char('s') => AppCommand::ToggleSortPicker,
             KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 AppCommand::ReorderSelectedColumn(-1)
             }
@@ -337,6 +385,19 @@ fn key_command(key: KeyEvent, viewport_rows: usize, column_picker_open: bool) ->
             KeyCode::Up | KeyCode::Char('k') => AppCommand::MoveColumnPicker(-1),
             KeyCode::Down | KeyCode::Char('j') => AppCommand::MoveColumnPicker(1),
             KeyCode::Char(' ') | KeyCode::Enter => AppCommand::ToggleSelectedColumn,
+            _ => AppCommand::Noop,
+        };
+    }
+
+    if sort_picker_open {
+        return match code {
+            KeyCode::Char('q') => AppCommand::Quit,
+            KeyCode::Esc => AppCommand::CloseOverlay,
+            KeyCode::Char('v') => AppCommand::ToggleColumnPicker,
+            KeyCode::Char('s') => AppCommand::ToggleSortPicker,
+            KeyCode::Up | KeyCode::Char('k') => AppCommand::MoveSortPicker(-1),
+            KeyCode::Down | KeyCode::Char('j') => AppCommand::MoveSortPicker(1),
+            KeyCode::Char(' ') | KeyCode::Enter => AppCommand::ApplySelectedSort,
             _ => AppCommand::Noop,
         };
     }
@@ -355,16 +416,24 @@ fn key_command(key: KeyEvent, viewport_rows: usize, column_picker_open: bool) ->
         KeyCode::Right => AppCommand::TreeRight,
         KeyCode::Char('t') => AppCommand::ToggleViewMode,
         KeyCode::Char('v') => AppCommand::ToggleColumnPicker,
-        KeyCode::Char('i') => AppCommand::Resort(SortKey::Pid),
-        KeyCode::Char('p') => AppCommand::Resort(SortKey::Ppid),
-        KeyCode::Char('o') => AppCommand::Resort(SortKey::Owner),
-        KeyCode::Char('n') => AppCommand::Resort(SortKey::Name),
-        KeyCode::Char('m') => AppCommand::Resort(SortKey::Command),
-        KeyCode::Char('r') => AppCommand::Resort(SortKey::Rss),
-        KeyCode::Char('s') => AppCommand::Resort(SortKey::Swap),
-        KeyCode::Char('c') => AppCommand::Resort(SortKey::Cpu),
+        KeyCode::Char('s') => AppCommand::ToggleSortPicker,
         _ => AppCommand::Noop,
     }
+}
+
+fn moved_index(current: usize, delta: isize, max_index: usize) -> usize {
+    if delta < 0 {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        current.saturating_add(delta as usize)
+    }
+    .min(max_index)
+}
+
+fn sort_key_index(sort_key: SortKey) -> usize {
+    SortKey::iter()
+        .position(|key| key == sort_key)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -410,11 +479,11 @@ mod tests {
     #[test]
     fn key_command_maps_page_navigation() {
         assert_eq!(
-            key_command(key(KeyCode::PageUp), 3, false),
+            key_command(key(KeyCode::PageUp), 3, false, false),
             AppCommand::MoveSelection(-3)
         );
         assert_eq!(
-            key_command(key(KeyCode::PageDown), 3, false),
+            key_command(key(KeyCode::PageDown), 3, false, false),
             AppCommand::MoveSelection(3)
         );
     }
@@ -422,20 +491,36 @@ mod tests {
     #[test]
     fn key_command_uses_column_picker_bindings_when_open() {
         assert_eq!(
-            key_command(key(KeyCode::Down), 3, true),
+            key_command(key(KeyCode::Down), 3, true, false),
             AppCommand::MoveColumnPicker(1)
         );
         assert_eq!(
-            key_command(key(KeyCode::Enter), 3, true),
+            key_command(key(KeyCode::Enter), 3, true, false),
             AppCommand::ToggleSelectedColumn
         );
         assert_eq!(
-            key_command(shifted(KeyCode::Up), 3, true),
+            key_command(shifted(KeyCode::Up), 3, true, false),
             AppCommand::ReorderSelectedColumn(-1)
         );
         assert_eq!(
-            key_command(key(KeyCode::Char('J')), 3, true),
+            key_command(key(KeyCode::Char('J')), 3, true, false),
             AppCommand::ReorderSelectedColumn(1)
+        );
+    }
+
+    #[test]
+    fn key_command_uses_sort_picker_bindings_when_open() {
+        assert_eq!(
+            key_command(key(KeyCode::Down), 3, false, true),
+            AppCommand::MoveSortPicker(1)
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Enter), 3, false, true),
+            AppCommand::ApplySelectedSort
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Esc), 3, false, true),
+            AppCommand::CloseOverlay
         );
     }
 
@@ -445,10 +530,11 @@ mod tests {
         app.data.snapshot.processes = vec![sample_row(1), sample_row(2)];
         app.view.sort_state = SortState::new(SortKey::Rss, SortDirection::Descending);
 
-        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.view.sort_state.direction, SortDirection::Ascending);
 
-        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.view.sort_state.direction, SortDirection::Descending);
     }
 
@@ -458,9 +544,27 @@ mod tests {
         app.data.snapshot.processes = vec![sample_row(1), sample_row(2)];
         app.view.sort_state = SortState::new(SortKey::Rss, SortDirection::Descending);
 
-        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_key(key(KeyCode::Char('s')));
+        app.view.sort_picker_index = 0;
+        app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.view.sort_state.key, SortKey::Pid);
         assert_eq!(app.view.sort_state.direction, SortDirection::Ascending);
+    }
+
+    #[test]
+    fn old_sort_shortcuts_do_not_resort_from_table() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.data.snapshot.processes = vec![sample_row(1), sample_row(2)];
+        app.view.sort_state = SortState::new(SortKey::Rss, SortDirection::Descending);
+
+        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Char('c')));
+
+        assert_eq!(
+            app.view.sort_state,
+            SortState::new(SortKey::Rss, SortDirection::Descending)
+        );
     }
 
     #[test]
@@ -768,6 +872,44 @@ mod tests {
         assert!(app.view.column_picker_open);
         app.handle_key(key(KeyCode::Char('v')));
         assert!(!app.view.column_picker_open);
+    }
+
+    #[test]
+    fn s_toggles_sort_picker() {
+        let mut app = AppState::new(ProcfsCollector::new());
+
+        assert!(!app.view.sort_picker_open);
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(app.view.sort_picker_open);
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(!app.view.sort_picker_open);
+    }
+
+    #[test]
+    fn opening_one_picker_closes_the_other() {
+        let mut app = AppState::new(ProcfsCollector::new());
+
+        app.handle_key(key(KeyCode::Char('v')));
+        assert!(app.view.column_picker_open);
+
+        app.handle_key(key(KeyCode::Char('s')));
+
+        assert!(!app.view.column_picker_open);
+        assert!(app.view.sort_picker_open);
+    }
+
+    #[test]
+    fn sort_picker_can_move_selection() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.handle_key(key(KeyCode::Char('s')));
+
+        app.handle_key(key(KeyCode::Char('j')));
+
+        assert_eq!(app.view.sort_picker_index, 6);
+
+        app.handle_key(key(KeyCode::Char('k')));
+
+        assert_eq!(app.view.sort_picker_index, 5);
     }
 
     #[test]

@@ -43,6 +43,8 @@ pub(super) struct AppViewState {
     pub(super) columns: ColumnLayout,
     pub(super) column_picker_open: bool,
     pub(super) column_picker_index: usize,
+    pub(super) sort_picker_open: bool,
+    pub(super) sort_picker_index: usize,
 }
 
 impl AppViewState {
@@ -57,6 +59,8 @@ impl AppViewState {
             columns: ColumnLayout::default(),
             column_picker_open: false,
             column_picker_index: 0,
+            sort_picker_open: false,
+            sort_picker_index: 0,
         }
     }
 }

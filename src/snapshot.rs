@@ -1,9 +1,9 @@
 use compact_str::{CompactString, format_compact};
 use std::time::Instant;
-use strum::{AsRefStr, IntoStaticStr};
+use strum::{AsRefStr, EnumIter, IntoStaticStr};
 
 /// Sort keys supported by the process table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum SortKey {
     /// Sort by process ID.
@@ -25,6 +25,20 @@ pub enum SortKey {
 }
 
 impl SortKey {
+    /// Returns the human-readable column label for this sort key.
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::Pid => "PID",
+            Self::Ppid => "PPID",
+            Self::Owner => "OWNER",
+            Self::Name => "NAME",
+            Self::Command => "COMMAND",
+            Self::Rss => "RSS",
+            Self::Swap => "SWAP",
+            Self::Cpu => "CPU",
+        }
+    }
+
     /// Returns the default sort direction for this key.
     pub fn default_direction(&self) -> SortDirection {
         use SortKey::*;

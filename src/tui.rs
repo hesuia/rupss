@@ -43,6 +43,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     if app.is_column_picker_open() {
         render_column_picker(frame, app);
     }
+    if app.is_sort_picker_open() {
+        render_sort_picker(frame, app);
+    }
 }
 
 fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: bool) {
@@ -218,11 +221,64 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     .header(header)
     .block(
         Block::default().title(
-                "Processes  q:quit  t:tree  v:columns  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page  i/p/o/n/m/r/s/c:sort",
+                "Processes  q:quit  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page",
             )
             .borders(Borders::ALL),
     )
     .column_spacing(crate::app::PROCESS_TABLE_COLUMN_SPACING);
+
+    frame.render_widget(table, area);
+}
+
+fn render_sort_picker(frame: &mut Frame<'_>, app: &AppState) {
+    let area = centered_rect(frame.area(), 36, 12);
+    frame.render_widget(Clear, area);
+    let sort_state = app.sort_state();
+    let sort_keys = app.sort_picker_keys();
+
+    let rows = sort_keys.iter().enumerate().map(|(index, sort_key)| {
+        let selected = index == app.sort_picker_index();
+        let active = *sort_key == sort_state.key;
+        let active_mark = if active { ">" } else { " " };
+        let direction = if active {
+            sort_state.direction
+        } else {
+            sort_key.default_direction()
+        };
+        let label = format!(
+            "{active_mark} {:<8} {}",
+            sort_key.title(),
+            direction.as_ref()
+        );
+        let style = if selected {
+            Style::default()
+                .bg(COLUMN_PICKER_SELECTED_BACKGROUND)
+                .fg(Color::White)
+        } else if active {
+            Style::default()
+                .bg(COLUMN_PICKER_BACKGROUND)
+                .fg(Color::Yellow)
+        } else {
+            Style::default().bg(COLUMN_PICKER_BACKGROUND)
+        };
+        Row::new(vec![Cell::from(label)]).style(style)
+    });
+
+    let table = Table::new(rows, [Constraint::Min(28)])
+        .block(
+            Block::default()
+                .title("Sort  j/k:select  Enter/Space:apply  Esc/s:close")
+                .borders(Borders::ALL)
+                .style(Style::default().bg(COLUMN_PICKER_BACKGROUND))
+                .border_style(Style::default().fg(COLUMN_PICKER_BORDER))
+                .title_style(
+                    Style::default()
+                        .fg(COLUMN_PICKER_BORDER)
+                        .bg(COLUMN_PICKER_BACKGROUND)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
+        .column_spacing(0);
 
     frame.render_widget(table, area);
 }
