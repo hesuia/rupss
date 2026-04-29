@@ -59,6 +59,14 @@ cargo run
 - CPU% is computed from tick deltas between consecutive samples and is per
   process (not normalized by CPU count).
 
+## Possible Next Features
+
+- Persist UI preferences such as visible columns, column order, sort state, and view mode between runs.
+- Add process search and filtering by PID, name, owner, or command substring.
+- Add a pause/resume refresh toggle and configurable refresh interval.
+- Add process actions such as sending signals or changing priority, with confirmation prompts.
+- Add an in-app help overlay for shortcuts and navigation.
+
 ## License
 
 MIT (see `LICENSE`).
