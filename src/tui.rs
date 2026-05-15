@@ -1,5 +1,5 @@
 use crate::{
-    app::{AppState, ProcessColumn, ViewMode},
+    app::{AppState, FilterRow, ProcessColumn, ViewMode},
     format::{format_bytes, format_option_bytes, format_percent},
 };
 use ratatui::{
@@ -45,6 +45,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     }
     if app.is_sort_picker_open() {
         render_sort_picker(frame, app);
+    }
+    if app.is_filter_modal_open() {
+        render_filter_modal(frame, app);
     }
 }
 
@@ -145,8 +148,9 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "count {} / agg-rss {} / agg-swap {} / sort {} / mode {} / selected {} / age {}ms",
+                "count {} / shown {} / agg-rss {} / agg-swap {} / sort {} / mode {} / selected {} / age {}ms",
                 system.process_count,
+                app.filtered_process_count(),
                 format_bytes(system.total_process_rss),
                 format_bytes(system.total_process_swap),
                 app.sort_state().label(),
@@ -211,6 +215,20 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         .style(style)
     });
 
+    let filter_hint = if app.is_filter_modal_open() {
+        let modal = app.filter_modal();
+        let mode = if modal.editing { "edit" } else { "nav" };
+        let err = if modal.error.is_some() { " !" } else { "" };
+        format!(" filter[{mode}]{err}")
+    } else if app.is_filter_active() {
+        " filter[on]".to_string()
+    } else {
+        " filter[-]".to_string()
+    };
+    let title = format!(
+        "Processes  q:quit  f:filter{filter_hint}  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page"
+    );
+
     let table = Table::new(
         rows,
         columns
@@ -219,13 +237,79 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
             .collect::<Vec<_>>(),
     )
     .header(header)
-    .block(
-        Block::default().title(
-                "Processes  q:quit  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page",
-            )
-            .borders(Borders::ALL),
-    )
+    .block(Block::default().title(title).borders(Borders::ALL))
     .column_spacing(crate::app::PROCESS_TABLE_COLUMN_SPACING);
+
+    frame.render_widget(table, area);
+}
+
+fn render_filter_modal(frame: &mut Frame<'_>, app: &AppState) {
+    let area = centered_rect(frame.area(), 56, 16);
+    frame.render_widget(Clear, area);
+
+    let modal = app.filter_modal();
+    let selected_row = FilterRow::ALL
+        .get(modal.selected)
+        .copied()
+        .unwrap_or(FilterRow::Pid);
+
+    let rows = FilterRow::ALL.iter().enumerate().map(|(index, row)| {
+        let selected = index == modal.selected;
+        let style = if selected {
+            Style::default()
+                .bg(COLUMN_PICKER_SELECTED_BACKGROUND)
+                .fg(Color::White)
+        } else {
+            Style::default().bg(COLUMN_PICKER_BACKGROUND)
+        };
+
+        let (op, value) = match row {
+            FilterRow::Pid => ("", modal.pid.as_str()),
+            FilterRow::Ppid => ("", modal.ppid.as_str()),
+            FilterRow::Name => ("", modal.name.as_str()),
+            FilterRow::Command => ("", modal.command.as_str()),
+            FilterRow::Rss => (modal.rss_op.label(), modal.rss_value.as_str()),
+            FilterRow::Swap => (modal.swap_op.label(), modal.swap_value.as_str()),
+            FilterRow::Cpu => (modal.cpu_op.label(), modal.cpu_value.as_str()),
+            FilterRow::Uss => (modal.uss_op.label(), modal.uss_value.as_str()),
+            FilterRow::Pss => (modal.pss_op.label(), modal.pss_value.as_str()),
+        };
+
+        let title = row.title();
+        let value_display = if value.is_empty() { "-" } else { value };
+        let op_display = if op.is_empty() { "" } else { op };
+        let line = if row.is_metric() {
+            format!("{:<8} {:<2} {}", title, op_display, value_display)
+        } else {
+            format!("{:<8} {}", title, value_display)
+        };
+
+        Row::new(vec![Cell::from(line)]).style(style)
+    });
+
+    let mut title = format!(
+        "Filter ({})  j/k:move  Enter:edit  h/l:op  Esc:close",
+        if modal.editing { "edit" } else { "nav" }
+    );
+    if let Some(err) = modal.error.as_deref() {
+        title.push_str(&format!("  error: {err}"));
+    } else if selected_row.is_metric() {
+        title.push_str("  units: B/KB/MB/GB (1024-base), cpu: % optional");
+    }
+
+    let table = Table::new(rows, [Constraint::Min(52)]).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .style(Style::default().bg(COLUMN_PICKER_BACKGROUND))
+            .border_style(Style::default().fg(COLUMN_PICKER_BORDER))
+            .title_style(
+                Style::default()
+                    .fg(COLUMN_PICKER_BORDER)
+                    .bg(COLUMN_PICKER_BACKGROUND)
+                    .add_modifier(Modifier::BOLD),
+            ),
+    );
 
     frame.render_widget(table, area);
 }

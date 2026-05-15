@@ -1,4 +1,5 @@
 mod columns;
+mod filter;
 mod input;
 mod navigation;
 mod owners;
@@ -18,6 +19,7 @@ use crate::{
 };
 pub(crate) use columns::ProcessColumn;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+pub(crate) use state::FilterRow;
 use std::{io::Stdout, ops::Range, time::Duration};
 use strum::{AsRefStr, IntoEnumIterator, IntoStaticStr};
 pub(crate) use tree::TreeRow;
@@ -104,6 +106,22 @@ impl AppState {
         self.view.sort_picker_open
     }
 
+    pub(crate) fn is_filter_modal_open(&self) -> bool {
+        self.view.filter_modal.open
+    }
+
+    pub(crate) fn filter_modal(&self) -> &self::state::FilterModalState {
+        &self.view.filter_modal
+    }
+
+    pub(crate) fn is_filter_active(&self) -> bool {
+        self.view.filter.is_active()
+    }
+
+    pub(crate) fn filtered_process_count(&self) -> usize {
+        self.flat_process_count()
+    }
+
     pub(crate) fn column_picker_index(&self) -> usize {
         self.view.column_picker_index
     }
@@ -138,12 +156,7 @@ impl AppState {
 
     pub(crate) fn process_index_at_visible_row(&self, visible_index: usize) -> Option<usize> {
         match self.view.view_mode {
-            ViewMode::Flat => self
-                .data
-                .snapshot
-                .processes
-                .get(visible_index)
-                .map(|_| visible_index),
+            ViewMode::Flat => self.flat_process_index_at(visible_index),
             ViewMode::Tree => self
                 .tree
                 .rows
@@ -187,6 +200,7 @@ impl AppState {
 
     /// Returns the PID of the currently selected row, if any.
     pub fn selected_pid(&self) -> Option<i32> {
+        self.selected_visible_index()?;
         self.data
             .snapshot
             .processes
@@ -206,6 +220,54 @@ impl AppState {
 
     pub(crate) fn detail_request(&self) -> VisibleDetailRequest {
         self.view.columns.detail_request()
+    }
+
+    pub(super) fn flat_process_count(&self) -> usize {
+        if self.uses_cached_filtered_indexes() {
+            self.view.filtered_indexes.len()
+        } else {
+            self.data.snapshot.processes.len()
+        }
+    }
+
+    pub(super) fn flat_process_index_at(&self, visible_index: usize) -> Option<usize> {
+        if self.uses_cached_filtered_indexes() {
+            return self.view.filtered_indexes.get(visible_index).copied();
+        }
+
+        self.data
+            .snapshot
+            .processes
+            .get(visible_index)
+            .map(|_| visible_index)
+    }
+
+    pub(super) fn flat_visible_position(&self, process_index: usize) -> Option<usize> {
+        if self.uses_cached_filtered_indexes() {
+            return self
+                .view
+                .filtered_indexes
+                .iter()
+                .position(|index| *index == process_index);
+        }
+
+        (process_index < self.data.snapshot.processes.len()).then_some(process_index)
+    }
+
+    pub(super) fn current_flat_process_indexes(&self) -> Vec<usize> {
+        if self.uses_cached_filtered_indexes() {
+            return self.view.filtered_indexes.clone();
+        }
+
+        (0..self.data.snapshot.processes.len()).collect()
+    }
+
+    fn uses_cached_filtered_indexes(&self) -> bool {
+        if self.view.filter.is_active() || !self.view.filtered_indexes.is_empty() {
+            return true;
+        }
+
+        false
     }
 }
 

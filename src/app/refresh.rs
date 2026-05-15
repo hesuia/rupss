@@ -1,15 +1,19 @@
 use super::AppState;
-use crate::{collector::SystemCollector, snapshot::HistoryPoint};
+use crate::{
+    collector::{DetailedMemorySample, SystemCollector, VisibleDetailRequest},
+    snapshot::HistoryPoint,
+};
+use std::collections::HashMap;
 use std::time::Instant;
 
 impl AppState {
-    /// Refreshes the full snapshot and then loads detailed memory data for visible rows.
+    /// Refreshes the full snapshot and then loads any detailed memory data needed by the UI.
     ///
     /// The refresh flow:
     /// 1. Collect a cheap full-process snapshot and aggregate totals.
     /// 2. Sort the list and keep the previously selected PID if still present.
     /// 3. Update the history buffers for the top graphs.
-    /// 4. Load `smaps_rollup` details only for the rows currently visible.
+    /// 4. Load `smaps_rollup` details for filter predicates and visible rows when needed.
     pub fn refresh(&mut self) {
         let selected_pid = self.selected_pid();
         let now = Instant::now();
@@ -23,6 +27,8 @@ impl AppState {
                 self.data.previous_cpu = next_cpu;
                 self.sort_snapshot_processes(&mut snapshot.processes);
                 self.data.snapshot = snapshot;
+                self.populate_filter_details();
+                self.rebuild_filtered_indexes();
                 self.rebuild_tree_rows();
                 self.restore_selection(selected_pid, false);
                 self.push_history(history_point);
@@ -51,6 +57,38 @@ impl AppState {
             .resources
             .collector
             .collect_visible_memory_details(&pids, request);
+        self.apply_memory_details(details);
+    }
+
+    pub(super) fn populate_filter_details(&mut self) {
+        let request = self.view.filter.detail_request();
+        if !request.needs_any() {
+            return;
+        }
+
+        let pids = self
+            .data
+            .snapshot
+            .processes
+            .iter()
+            .map(|row| row.pid)
+            .collect::<Vec<_>>();
+        self.populate_memory_details(&pids, request);
+    }
+
+    fn populate_memory_details(&mut self, pids: &[i32], request: VisibleDetailRequest) {
+        if pids.is_empty() || !request.needs_any() {
+            return;
+        }
+
+        let details = self
+            .resources
+            .collector
+            .collect_visible_memory_details(pids, request);
+        self.apply_memory_details(details);
+    }
+
+    fn apply_memory_details(&mut self, details: HashMap<i32, DetailedMemorySample>) {
         for row in &mut self.data.snapshot.processes {
             if let Some(detail) = details.get(&row.pid) {
                 row.uss_bytes = detail.uss_bytes;

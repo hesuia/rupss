@@ -1,4 +1,7 @@
-use super::{HISTORY_CAPACITY, TreeRow, ViewMode, columns::ColumnLayout, owners::OwnerNameCache};
+use super::{
+    HISTORY_CAPACITY, TreeRow, ViewMode, columns::ColumnLayout, filter::MetricFilterOperator,
+    filter::ProcessFilter, owners::OwnerNameCache,
+};
 use crate::{
     collector::{CpuSample, ProcfsCollector},
     error::CollectorError,
@@ -32,6 +35,103 @@ impl AppDataState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilterRow {
+    Pid,
+    Ppid,
+    Name,
+    Command,
+    Rss,
+    Swap,
+    Cpu,
+    Uss,
+    Pss,
+}
+
+impl FilterRow {
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Pid,
+        Self::Ppid,
+        Self::Name,
+        Self::Command,
+        Self::Rss,
+        Self::Swap,
+        Self::Cpu,
+        Self::Uss,
+        Self::Pss,
+    ];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Pid => "PID",
+            Self::Ppid => "PPID",
+            Self::Name => "NAME",
+            Self::Command => "COMMAND",
+            Self::Rss => "RSS",
+            Self::Swap => "SWAP",
+            Self::Cpu => "CPU",
+            Self::Uss => "USS",
+            Self::Pss => "PSS",
+        }
+    }
+
+    pub(crate) fn is_metric(self) -> bool {
+        matches!(
+            self,
+            Self::Rss | Self::Swap | Self::Cpu | Self::Uss | Self::Pss
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FilterModalState {
+    pub(crate) open: bool,
+    pub(crate) selected: usize,
+    pub(crate) editing: bool,
+    pub(crate) error: Option<String>,
+
+    pub(crate) pid: String,
+    pub(crate) ppid: String,
+    pub(crate) name: String,
+    pub(crate) command: String,
+
+    pub(crate) rss_op: MetricFilterOperator,
+    pub(crate) rss_value: String,
+    pub(crate) swap_op: MetricFilterOperator,
+    pub(crate) swap_value: String,
+    pub(crate) cpu_op: MetricFilterOperator,
+    pub(crate) cpu_value: String,
+    pub(crate) uss_op: MetricFilterOperator,
+    pub(crate) uss_value: String,
+    pub(crate) pss_op: MetricFilterOperator,
+    pub(crate) pss_value: String,
+}
+
+impl Default for FilterModalState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            selected: 0,
+            editing: false,
+            error: None,
+            pid: String::new(),
+            ppid: String::new(),
+            name: String::new(),
+            command: String::new(),
+            rss_op: MetricFilterOperator::GreaterThanOrEqual,
+            rss_value: String::new(),
+            swap_op: MetricFilterOperator::GreaterThanOrEqual,
+            swap_value: String::new(),
+            cpu_op: MetricFilterOperator::GreaterThanOrEqual,
+            cpu_value: String::new(),
+            uss_op: MetricFilterOperator::GreaterThanOrEqual,
+            uss_value: String::new(),
+            pss_op: MetricFilterOperator::GreaterThanOrEqual,
+            pss_value: String::new(),
+        }
+    }
+}
+
 /// Mutable state used to navigate and render the process table.
 pub(super) struct AppViewState {
     pub(super) sort_state: SortState,
@@ -45,6 +145,9 @@ pub(super) struct AppViewState {
     pub(super) column_picker_index: usize,
     pub(super) sort_picker_open: bool,
     pub(super) sort_picker_index: usize,
+    pub(super) filter: ProcessFilter,
+    pub(super) filter_modal: FilterModalState,
+    pub(super) filtered_indexes: Vec<usize>,
 }
 
 impl AppViewState {
@@ -61,6 +164,9 @@ impl AppViewState {
             column_picker_index: 0,
             sort_picker_open: false,
             sort_picker_index: 0,
+            filter: ProcessFilter::default(),
+            filter_modal: FilterModalState::default(),
+            filtered_indexes: Vec::new(),
         }
     }
 }

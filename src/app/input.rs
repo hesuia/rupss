@@ -2,8 +2,9 @@ use super::{
     AppState, KeyAction, ProcessColumn, ViewMode,
     navigation::{
         boundary_selection, clamp_scroll_offset, ensure_visible_scroll, is_inside_table,
-        move_visible_index, restored_selection, table_hit_test,
+        move_visible_index, table_hit_test,
     },
+    state::FilterRow,
 };
 use crate::snapshot::{SortDirection, SortKey, SortState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -19,6 +20,13 @@ enum AppCommand {
     ToggleViewMode,
     ToggleColumnPicker,
     ToggleSortPicker,
+    ToggleFilterModal,
+    MoveFilterSelection(isize),
+    ToggleFilterEditing,
+    FilterPushChar(char),
+    FilterPopChar,
+    FilterClear,
+    CycleFilterOperator(isize),
     MoveColumnPicker(isize),
     MoveSortPicker(isize),
     ReorderSelectedColumn(isize),
@@ -40,6 +48,8 @@ impl AppState {
             self.view.viewport_rows,
             self.view.column_picker_open,
             self.view.sort_picker_open,
+            self.view.filter_modal.open,
+            self.view.filter_modal.editing,
         ))
     }
 
@@ -66,6 +76,34 @@ impl AppState {
             }
             AppCommand::ToggleSortPicker => {
                 self.toggle_sort_picker();
+                KeyAction::Continue
+            }
+            AppCommand::ToggleFilterModal => {
+                self.toggle_filter_modal();
+                KeyAction::Continue
+            }
+            AppCommand::MoveFilterSelection(delta) => {
+                self.move_filter_selection(delta);
+                KeyAction::Continue
+            }
+            AppCommand::ToggleFilterEditing => {
+                self.toggle_filter_editing();
+                KeyAction::Continue
+            }
+            AppCommand::FilterPushChar(ch) => {
+                self.filter_push_char(ch);
+                KeyAction::Continue
+            }
+            AppCommand::FilterPopChar => {
+                self.filter_pop_char();
+                KeyAction::Continue
+            }
+            AppCommand::FilterClear => {
+                self.filter_clear();
+                KeyAction::Continue
+            }
+            AppCommand::CycleFilterOperator(delta) => {
+                self.filter_cycle_operator(delta);
                 KeyAction::Continue
             }
             AppCommand::MoveColumnPicker(delta) => {
@@ -110,16 +148,32 @@ impl AppState {
     }
 
     pub(super) fn restore_selection(&mut self, selected_pid: Option<i32>, ensure_visible: bool) {
-        if self.data.snapshot.processes.is_empty() {
+        let flat_indexes = self.current_flat_process_indexes();
+        if flat_indexes.is_empty() {
             self.view.selected = 0;
             self.view.scroll_offset = 0;
             return;
         }
 
-        self.view.selected = restored_selection(selected_pid, &self.data.snapshot.processes);
+        self.view.selected = selected_pid
+            .and_then(|pid| {
+                flat_indexes
+                    .iter()
+                    .copied()
+                    .find(|index| self.data.snapshot.processes[*index].pid == pid)
+            })
+            .unwrap_or(flat_indexes[0]);
 
         if self.view.view_mode == ViewMode::Tree {
             self.ensure_tree_selection_visible();
+            if self.selected_visible_index().is_none() {
+                self.view.selected = self
+                    .tree
+                    .rows
+                    .first()
+                    .map(|row| row.process_index)
+                    .unwrap_or(self.view.selected);
+            }
         }
 
         if ensure_visible {
@@ -131,7 +185,7 @@ impl AppState {
 
     pub(super) fn ensure_visible(&mut self) {
         let selected_visible = match self.view.view_mode {
-            ViewMode::Flat => self.view.selected,
+            ViewMode::Flat => self.selected_visible_index().unwrap_or(0),
             ViewMode::Tree => self.selected_visible_index().unwrap_or(0),
         };
 
@@ -166,7 +220,7 @@ impl AppState {
     fn jump_to_boundary_and_continue(&mut self, to_start: bool) -> KeyAction {
         self.view.selected = boundary_selection(
             self.view.view_mode,
-            self.data.snapshot.processes.len(),
+            &self.current_flat_process_indexes(),
             &self.tree.rows,
             to_start,
         );
@@ -179,6 +233,7 @@ impl AppState {
         self.view.sort_state.toggle_key(sort_key);
         let selected_pid = self.selected_pid();
         self.sort_current_processes();
+        self.rebuild_filtered_indexes();
         self.rebuild_tree_rows();
         self.restore_selection(selected_pid, true);
         self.populate_visible_details();
@@ -201,7 +256,10 @@ impl AppState {
             None => return,
         };
         self.view.selected = match self.view.view_mode {
-            ViewMode::Flat => next,
+            ViewMode::Flat => match self.flat_process_index_at(next) {
+                Some(process_index) => process_index,
+                None => return,
+            },
             ViewMode::Tree => self.tree.rows[next].process_index,
         };
         self.ensure_visible();
@@ -265,6 +323,8 @@ impl AppState {
         self.view.column_picker_open = !self.view.column_picker_open;
         if self.view.column_picker_open {
             self.view.sort_picker_open = false;
+            self.view.filter_modal.open = false;
+            self.view.filter_modal.editing = false;
         }
         self.view.column_picker_index = self
             .view
@@ -276,6 +336,8 @@ impl AppState {
         self.view.sort_picker_open = !self.view.sort_picker_open;
         if self.view.sort_picker_open {
             self.view.column_picker_open = false;
+            self.view.filter_modal.open = false;
+            self.view.filter_modal.editing = false;
             self.view.sort_picker_index = sort_key_index(self.view.sort_state.key);
         }
     }
@@ -283,6 +345,120 @@ impl AppState {
     fn close_overlay(&mut self) {
         self.view.column_picker_open = false;
         self.view.sort_picker_open = false;
+        self.view.filter_modal.open = false;
+        self.view.filter_modal.editing = false;
+    }
+
+    fn toggle_filter_modal(&mut self) {
+        let now_open = !self.view.filter_modal.open;
+        self.view.filter_modal.open = now_open;
+        self.view.filter_modal.editing = false;
+        if now_open {
+            self.view.column_picker_open = false;
+            self.view.sort_picker_open = false;
+        }
+    }
+
+    fn move_filter_selection(&mut self, delta: isize) {
+        if !self.view.filter_modal.open || self.view.filter_modal.editing {
+            return;
+        }
+
+        self.view.filter_modal.selected = moved_index(
+            self.view.filter_modal.selected,
+            delta,
+            FilterRow::ALL.len().saturating_sub(1),
+        );
+    }
+
+    fn toggle_filter_editing(&mut self) {
+        if !self.view.filter_modal.open {
+            return;
+        }
+
+        self.view.filter_modal.editing = !self.view.filter_modal.editing;
+    }
+
+    fn filter_push_char(&mut self, ch: char) {
+        if !self.view.filter_modal.open || !self.view.filter_modal.editing {
+            return;
+        }
+
+        self.filter_active_input_mut().push(ch);
+        self.apply_filter_modal();
+    }
+
+    fn filter_pop_char(&mut self) {
+        if !self.view.filter_modal.open || !self.view.filter_modal.editing {
+            return;
+        }
+
+        self.filter_active_input_mut().pop();
+        self.apply_filter_modal();
+    }
+
+    fn filter_clear(&mut self) {
+        if !self.view.filter_modal.open || !self.view.filter_modal.editing {
+            return;
+        }
+
+        self.filter_active_input_mut().clear();
+        self.apply_filter_modal();
+    }
+
+    fn filter_cycle_operator(&mut self, delta: isize) {
+        if !self.view.filter_modal.open || self.view.filter_modal.editing {
+            return;
+        }
+
+        let row = self.filter_selected_row();
+        if !row.is_metric() {
+            return;
+        }
+
+        let op_ref = match row {
+            FilterRow::Rss => &mut self.view.filter_modal.rss_op,
+            FilterRow::Swap => &mut self.view.filter_modal.swap_op,
+            FilterRow::Cpu => &mut self.view.filter_modal.cpu_op,
+            FilterRow::Uss => &mut self.view.filter_modal.uss_op,
+            FilterRow::Pss => &mut self.view.filter_modal.pss_op,
+            FilterRow::Pid | FilterRow::Ppid | FilterRow::Name | FilterRow::Command => return,
+        };
+        *op_ref = op_ref.cycle(delta);
+        self.apply_filter_modal();
+    }
+
+    fn apply_filter_modal(&mut self) {
+        let selected_pid = self.selected_pid();
+        let (filter, error) = super::filter::try_build_filter_from_modal(&self.view.filter_modal);
+        self.view.filter = filter;
+        self.view.filter_modal.error = error;
+        self.populate_filter_details();
+        self.rebuild_filtered_indexes();
+        self.rebuild_tree_rows();
+        self.restore_selection(selected_pid, true);
+        self.populate_visible_details();
+    }
+
+    fn filter_selected_row(&self) -> FilterRow {
+        FilterRow::ALL
+            .get(self.view.filter_modal.selected)
+            .copied()
+            .unwrap_or(FilterRow::Pid)
+    }
+
+    fn filter_active_input_mut(&mut self) -> &mut String {
+        match self.filter_selected_row() {
+            FilterRow::Pid => &mut self.view.filter_modal.pid,
+            FilterRow::Ppid => &mut self.view.filter_modal.ppid,
+            FilterRow::Name => &mut self.view.filter_modal.name,
+            FilterRow::Command => &mut self.view.filter_modal.command,
+            FilterRow::Rss => &mut self.view.filter_modal.rss_value,
+            FilterRow::Swap => &mut self.view.filter_modal.swap_value,
+            FilterRow::Cpu => &mut self.view.filter_modal.cpu_value,
+            FilterRow::Uss => &mut self.view.filter_modal.uss_value,
+            FilterRow::Pss => &mut self.view.filter_modal.pss_value,
+        }
     }
 
     fn move_column_picker(&mut self, delta: isize) {
@@ -356,6 +532,7 @@ impl AppState {
         let selected_pid = self.selected_pid();
         self.view.sort_state = SortState::new(SortKey::Rss, SortDirection::Descending);
         self.sort_current_processes();
+        self.rebuild_filtered_indexes();
         self.rebuild_tree_rows();
         self.restore_selection(selected_pid, true);
     }
@@ -366,8 +543,52 @@ fn key_command(
     viewport_rows: usize,
     column_picker_open: bool,
     sort_picker_open: bool,
+    filter_modal_open: bool,
+    filter_modal_editing: bool,
 ) -> AppCommand {
     let code = key.code;
+    if filter_modal_open {
+        if filter_modal_editing {
+            return match code {
+                KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    AppCommand::Quit
+                }
+                KeyCode::Esc => AppCommand::CloseOverlay,
+                KeyCode::Enter => AppCommand::ToggleFilterEditing,
+                KeyCode::Backspace => AppCommand::FilterPopChar,
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    AppCommand::FilterClear
+                }
+                KeyCode::Char(ch)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    AppCommand::FilterPushChar(ch)
+                }
+                _ => AppCommand::Noop,
+            };
+        }
+
+        return match code {
+            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => AppCommand::Quit,
+            KeyCode::Esc => AppCommand::CloseOverlay,
+            KeyCode::Enter => AppCommand::ToggleFilterEditing,
+            KeyCode::Up | KeyCode::Char('k') => AppCommand::MoveFilterSelection(-1),
+            KeyCode::Down | KeyCode::Char('j') => AppCommand::MoveFilterSelection(1),
+            KeyCode::Left | KeyCode::Char('h') => AppCommand::CycleFilterOperator(-1),
+            KeyCode::Right | KeyCode::Char('l') => AppCommand::CycleFilterOperator(1),
+            KeyCode::Backspace => AppCommand::FilterPopChar,
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                AppCommand::FilterClear
+            }
+            KeyCode::Char(ch)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                AppCommand::FilterPushChar(ch)
+            }
+            _ => AppCommand::Noop,
+        };
+    }
+
     if column_picker_open {
         return match code {
             KeyCode::Char('q') => AppCommand::Quit,
@@ -417,6 +638,7 @@ fn key_command(
         KeyCode::Char('t') => AppCommand::ToggleViewMode,
         KeyCode::Char('v') => AppCommand::ToggleColumnPicker,
         KeyCode::Char('s') => AppCommand::ToggleSortPicker,
+        KeyCode::Char('f') => AppCommand::ToggleFilterModal,
         _ => AppCommand::Noop,
     }
 }
@@ -439,6 +661,7 @@ fn sort_key_index(sort_key: SortKey) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{AppCommand, AppState, KeyAction, key_command};
+    use crate::app::filter::ProcessFilter;
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
     use crate::{app::ProcessColumn, collector::ProcfsCollector};
     use crossterm::event::{
@@ -452,6 +675,10 @@ mod tests {
 
     fn shifted(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    fn controlled(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
     }
 
     fn sample_row(pid: i32) -> ProcessRow {
@@ -479,11 +706,11 @@ mod tests {
     #[test]
     fn key_command_maps_page_navigation() {
         assert_eq!(
-            key_command(key(KeyCode::PageUp), 3, false, false),
+            key_command(key(KeyCode::PageUp), 3, false, false, false, false),
             AppCommand::MoveSelection(-3)
         );
         assert_eq!(
-            key_command(key(KeyCode::PageDown), 3, false, false),
+            key_command(key(KeyCode::PageDown), 3, false, false, false, false),
             AppCommand::MoveSelection(3)
         );
     }
@@ -491,19 +718,19 @@ mod tests {
     #[test]
     fn key_command_uses_column_picker_bindings_when_open() {
         assert_eq!(
-            key_command(key(KeyCode::Down), 3, true, false),
+            key_command(key(KeyCode::Down), 3, true, false, false, false),
             AppCommand::MoveColumnPicker(1)
         );
         assert_eq!(
-            key_command(key(KeyCode::Enter), 3, true, false),
+            key_command(key(KeyCode::Enter), 3, true, false, false, false),
             AppCommand::ToggleSelectedColumn
         );
         assert_eq!(
-            key_command(shifted(KeyCode::Up), 3, true, false),
+            key_command(shifted(KeyCode::Up), 3, true, false, false, false),
             AppCommand::ReorderSelectedColumn(-1)
         );
         assert_eq!(
-            key_command(key(KeyCode::Char('J')), 3, true, false),
+            key_command(key(KeyCode::Char('J')), 3, true, false, false, false),
             AppCommand::ReorderSelectedColumn(1)
         );
     }
@@ -511,17 +738,178 @@ mod tests {
     #[test]
     fn key_command_uses_sort_picker_bindings_when_open() {
         assert_eq!(
-            key_command(key(KeyCode::Down), 3, false, true),
+            key_command(key(KeyCode::Down), 3, false, true, false, false),
             AppCommand::MoveSortPicker(1)
         );
         assert_eq!(
-            key_command(key(KeyCode::Enter), 3, false, true),
+            key_command(key(KeyCode::Enter), 3, false, true, false, false),
             AppCommand::ApplySelectedSort
         );
         assert_eq!(
-            key_command(key(KeyCode::Esc), 3, false, true),
+            key_command(key(KeyCode::Esc), 3, false, true, false, false),
             AppCommand::CloseOverlay
         );
+    }
+
+    #[test]
+    fn key_command_uses_filter_modal_bindings_when_open() {
+        assert_eq!(
+            key_command(key(KeyCode::Char('a')), 3, false, false, true, true),
+            AppCommand::FilterPushChar('a')
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Backspace), 3, false, false, true, true),
+            AppCommand::FilterPopChar
+        );
+        assert_eq!(
+            key_command(controlled(KeyCode::Char('u')), 3, false, false, true, true),
+            AppCommand::FilterClear
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Enter), 3, false, false, true, true),
+            AppCommand::ToggleFilterEditing
+        );
+    }
+
+    #[test]
+    fn f_opens_filter_modal() {
+        let mut app = AppState::new(ProcfsCollector::new());
+
+        app.handle_key(key(KeyCode::Char('f')));
+
+        assert!(app.view.filter_modal.open);
+    }
+
+    #[test]
+    fn filter_modal_filters_name() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        let mut ssh = sample_row(10);
+        ssh.name = "sshd".to_string();
+        ssh.command = "/usr/sbin/sshd".to_string();
+        let mut postgres = sample_row(20);
+        postgres.name = "postgres".to_string();
+        postgres.command = "postgres: checkpointer".to_string();
+        app.data.snapshot.processes = vec![ssh, postgres];
+        app.rebuild_filtered_indexes();
+
+        app.handle_key(key(KeyCode::Char('f')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('j'))); // move to NAME row
+        app.handle_key(key(KeyCode::Enter)); // start editing
+        for ch in "post".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // stop editing
+
+        assert_eq!(app.view.filtered_indexes, vec![1]);
+        assert_eq!(app.selected_pid(), Some(20));
+    }
+
+    #[test]
+    fn filter_modal_filters_metric_threshold() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        let mut small = sample_row(10);
+        small.rss_bytes = 99 * 1024 * 1024;
+        let mut large = sample_row(20);
+        large.rss_bytes = 100 * 1024 * 1024;
+        app.data.snapshot.processes = vec![small, large];
+        app.rebuild_filtered_indexes();
+
+        app.handle_key(key(KeyCode::Char('f')));
+        for _ in 0..4 {
+            app.handle_key(key(KeyCode::Char('j'))); // move to RSS row
+        }
+        app.handle_key(key(KeyCode::Enter)); // edit
+        for ch in "100MB".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // stop edit
+
+        assert_eq!(app.view.filtered_indexes, vec![1]);
+        assert_eq!(app.selected_pid(), Some(20));
+    }
+
+    #[test]
+    fn filter_modal_backspace_and_ctrl_u_update_visible_rows() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        let mut alpha = sample_row(10);
+        alpha.name = "alpha".to_string();
+        let mut beta = sample_row(20);
+        beta.name = "beta".to_string();
+        app.data.snapshot.processes = vec![alpha, beta];
+        app.rebuild_filtered_indexes();
+
+        app.handle_key(key(KeyCode::Char('f')));
+        assert_eq!(app.view.filter_modal.selected, 0);
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('j'))); // NAME
+        assert_eq!(app.view.filter_modal.selected, 2);
+        app.handle_key(key(KeyCode::Enter)); // edit
+        assert!(app.view.filter_modal.editing);
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(app.view.filtered_indexes, vec![0]);
+
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.view.filtered_indexes, vec![0, 1]);
+
+        app.handle_key(controlled(KeyCode::Char('u')));
+        assert_eq!(app.view.filtered_indexes, vec![0, 1]);
+    }
+
+    #[test]
+    fn filtered_flat_navigation_moves_between_matching_process_indexes() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        let mut first = sample_row(10);
+        first.name = "skip".to_string();
+        let mut second = sample_row(20);
+        second.name = "target-a".to_string();
+        let mut third = sample_row(30);
+        third.name = "skip".to_string();
+        let mut fourth = sample_row(40);
+        fourth.name = "target-b".to_string();
+        app.data.snapshot.processes = vec![first, second, third, fourth];
+        app.rebuild_filtered_indexes();
+
+        app.handle_key(key(KeyCode::Char('f')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('j'))); // NAME
+        app.handle_key(key(KeyCode::Enter)); // edit
+        for ch in "target".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // stop edit
+        app.handle_key(key(KeyCode::Esc)); // close modal
+
+        assert_eq!(app.view.filtered_indexes, vec![1, 3]);
+        assert_eq!(app.selected_pid(), Some(20));
+
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected_pid(), Some(40));
+
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.selected_pid(), Some(20));
+
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.selected_pid(), Some(40));
+
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.selected_pid(), Some(20));
+    }
+
+    #[test]
+    fn filtered_flat_ensure_visible_uses_visible_position_not_process_index() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.data.snapshot.processes = (10..70).step_by(10).map(sample_row).collect();
+        app.view.filter = ProcessFilter::from_text_query("name");
+        app.rebuild_filtered_indexes();
+        app.view.filtered_indexes = vec![1, 3, 5];
+        app.view.selected = 5;
+        app.view.viewport_rows = 2;
+
+        app.ensure_visible();
+
+        assert_eq!(app.view.scroll_offset, 1);
     }
 
     #[test]

@@ -19,18 +19,14 @@ pub(crate) struct TreeRow {
 impl AppState {
     pub fn total_visible_rows(&self) -> usize {
         match self.view.view_mode {
-            ViewMode::Flat => self.data.snapshot.processes.len(),
+            ViewMode::Flat => self.flat_process_count(),
             ViewMode::Tree => self.tree.rows.len(),
         }
     }
 
     pub fn selected_visible_index(&self) -> Option<usize> {
         match self.view.view_mode {
-            ViewMode::Flat => (!self.data.snapshot.processes.is_empty()).then_some(
-                self.view
-                    .selected
-                    .min(self.data.snapshot.processes.len().saturating_sub(1)),
-            ),
+            ViewMode::Flat => self.flat_visible_position(self.view.selected),
             ViewMode::Tree => selected_tree_visible_index(&self.tree.rows, self.view.selected),
         }
     }
@@ -73,12 +69,12 @@ impl AppState {
         if row.has_children && !row.expanded {
             self.tree.expanded_pids.insert(pid);
             self.rebuild_tree_rows();
-        } else if row.has_children && row.expanded {
-            if let Some(next_row) = self.tree.rows.get(current + 1) {
-                if next_row.parent_index == Some(row.process_index) {
-                    self.view.selected = next_row.process_index;
-                }
-            }
+        } else if row.has_children
+            && row.expanded
+            && let Some(next_row) = self.tree.rows.get(current + 1)
+            && next_row.parent_index == Some(row.process_index)
+        {
+            self.view.selected = next_row.process_index;
         }
 
         self.ensure_visible();
@@ -160,7 +156,16 @@ impl AppState {
             self.view.sort_state,
             &self.resources.owner_resolver,
             &self.tree.expanded_pids,
+            &self.current_flat_process_indexes(),
+            self.view.filter.is_active(),
         );
+    }
+
+    pub(super) fn rebuild_filtered_indexes(&mut self) {
+        self.view.filtered_indexes = self
+            .view
+            .filter
+            .matching_indexes(&self.data.snapshot.processes);
     }
 
     pub(super) fn sort_current_processes(&mut self) {
@@ -260,6 +265,8 @@ pub(super) fn build_process_tree_state<L: OwnerNameResolver + ?Sized>(
     sort_state: SortState,
     owner_lookup: &L,
     expanded_pids: &HashSet<i32>,
+    filtered_indexes: &[usize],
+    filter_active: bool,
 ) -> ProcessTreeState {
     let len = processes.len();
     if len == 0 {
@@ -270,19 +277,59 @@ pub(super) fn build_process_tree_state<L: OwnerNameResolver + ?Sized>(
     let expanded_pids = retain_known_expanded_pids(expanded_pids, &pid_to_index);
     let parents = build_parent_index(processes, &pid_to_index);
     let (mut roots, mut children) = build_tree_index(&parents, len);
+    let visible_indexes = tree_visible_indexes(filtered_indexes, &parents);
+    let force_expanded_pids = if filter_active {
+        forced_expanded_pids(filtered_indexes, &parents, processes)
+    } else {
+        HashSet::new()
+    };
 
     sort_process_indexes(sort_state, owner_lookup, processes, &mut roots);
     for child_indexes in &mut children {
         sort_process_indexes(sort_state, owner_lookup, processes, child_indexes);
     }
 
-    let rows = build_visible_tree_rows(processes, &children, &expanded_pids, &parents, &roots);
+    let rows = build_visible_tree_rows(
+        processes,
+        &children,
+        &expanded_pids,
+        &force_expanded_pids,
+        &parents,
+        &roots,
+        &visible_indexes,
+    );
 
     ProcessTreeState {
         expanded_pids,
         rows,
         parents,
     }
+}
+
+fn tree_visible_indexes(filtered_indexes: &[usize], parents: &[Option<usize>]) -> HashSet<usize> {
+    let mut visible = HashSet::new();
+    for index in filtered_indexes.iter().copied() {
+        visible.insert(index);
+        let mut current = Some(index);
+        while let Some(parent_index) =
+            current.and_then(|index| parents.get(index).copied().flatten())
+        {
+            visible.insert(parent_index);
+            current = Some(parent_index);
+        }
+    }
+    visible
+}
+
+fn forced_expanded_pids(
+    filtered_indexes: &[usize],
+    parents: &[Option<usize>],
+    processes: &[ProcessRow],
+) -> HashSet<i32> {
+    filtered_indexes
+        .iter()
+        .flat_map(|index| expanded_ancestor_pids(*index, parents, processes))
+        .collect()
 }
 
 fn build_pid_to_index(processes: &[ProcessRow]) -> HashMap<i32, usize> {
@@ -355,69 +402,105 @@ fn build_visible_tree_rows(
     processes: &[ProcessRow],
     children: &[Vec<usize>],
     expanded_pids: &HashSet<i32>,
+    force_expanded_pids: &HashSet<i32>,
     parents: &[Option<usize>],
     roots: &[usize],
+    visible_indexes: &HashSet<usize>,
 ) -> Vec<TreeRow> {
-    fn push_visible_rows(
-        rows: &mut Vec<TreeRow>,
-        processes: &[ProcessRow],
-        children: &[Vec<usize>],
-        expanded_pids: &HashSet<i32>,
-        parents: &[Option<usize>],
+    let mut builder = VisibleTreeBuilder::new(
+        processes,
+        children,
+        expanded_pids,
+        force_expanded_pids,
+        parents,
+        visible_indexes,
+    );
+    let root_count = roots.len();
+    for (root_idx, root) in roots.iter().copied().enumerate() {
+        builder.push(root, 0, root_idx + 1 == root_count, &[]);
+    }
+
+    builder.rows
+}
+
+struct VisibleTreeBuilder<'a> {
+    rows: Vec<TreeRow>,
+    processes: &'a [ProcessRow],
+    children: &'a [Vec<usize>],
+    expanded_pids: &'a HashSet<i32>,
+    force_expanded_pids: &'a HashSet<i32>,
+    parents: &'a [Option<usize>],
+    visible_indexes: &'a HashSet<usize>,
+}
+
+impl<'a> VisibleTreeBuilder<'a> {
+    fn new(
+        processes: &'a [ProcessRow],
+        children: &'a [Vec<usize>],
+        expanded_pids: &'a HashSet<i32>,
+        force_expanded_pids: &'a HashSet<i32>,
+        parents: &'a [Option<usize>],
+        visible_indexes: &'a HashSet<usize>,
+    ) -> Self {
+        Self {
+            rows: Vec::new(),
+            processes,
+            children,
+            expanded_pids,
+            force_expanded_pids,
+            parents,
+            visible_indexes,
+        }
+    }
+
+    fn push(
+        &mut self,
         index: usize,
         depth: usize,
         is_last_sibling: bool,
         ancestor_has_next_sibling: &[bool],
     ) {
-        let has_children = !children[index].is_empty();
-        let expanded = has_children && expanded_pids.contains(&processes[index].pid);
-        rows.push(TreeRow {
+        if !self.visible_indexes.contains(&index) {
+            return;
+        }
+
+        let has_children = !self.children[index].is_empty();
+        let expanded = has_children
+            && (self.expanded_pids.contains(&self.processes[index].pid)
+                || self
+                    .force_expanded_pids
+                    .contains(&self.processes[index].pid));
+        self.rows.push(TreeRow {
             process_index: index,
             depth,
             has_children,
             expanded,
-            parent_index: parents[index],
+            parent_index: self.parents[index],
             is_last_sibling,
             ancestor_has_next_sibling: ancestor_has_next_sibling.to_vec(),
         });
 
-        if expanded {
-            let mut child_guides = ancestor_has_next_sibling.to_vec();
-            child_guides.push(!is_last_sibling);
-            let child_count = children[index].len();
-            for (child_idx, &child) in children[index].iter().enumerate() {
-                push_visible_rows(
-                    rows,
-                    processes,
-                    children,
-                    expanded_pids,
-                    parents,
-                    child,
-                    depth + 1,
-                    child_idx + 1 == child_count,
-                    &child_guides,
-                );
-            }
+        if !expanded {
+            return;
+        }
+
+        let mut child_guides = ancestor_has_next_sibling.to_vec();
+        child_guides.push(!is_last_sibling);
+        let visible_children = self.children[index]
+            .iter()
+            .copied()
+            .filter(|child| self.visible_indexes.contains(child))
+            .collect::<Vec<_>>();
+        let child_count = visible_children.len();
+        for (child_idx, child) in visible_children.iter().copied().enumerate() {
+            self.push(
+                child,
+                depth + 1,
+                child_idx + 1 == child_count,
+                &child_guides,
+            );
         }
     }
-
-    let mut rows = Vec::new();
-    let root_count = roots.len();
-    for (root_idx, root) in roots.iter().copied().enumerate() {
-        push_visible_rows(
-            &mut rows,
-            processes,
-            children,
-            expanded_pids,
-            parents,
-            root,
-            0,
-            root_idx + 1 == root_count,
-            &[],
-        );
-    }
-
-    rows
 }
 
 #[cfg(test)]
@@ -527,6 +610,8 @@ mod tests {
             SortState::new(SortKey::Pid, SortDirection::Ascending),
             &TestOwnerLookup,
             &expanded,
+            &[0, 1, 2],
+            false,
         );
 
         assert_eq!(state.expanded_pids, HashSet::from([1]));
@@ -559,6 +644,40 @@ mod tests {
 
         assert_eq!(app.view.view_mode, ViewMode::Tree);
         assert_eq!(visible, vec![1, 4]);
+    }
+
+    #[test]
+    fn filtered_tree_keeps_matching_child_ancestors_visible() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        let parent = tree_row(1, 0);
+        let mut matching_child = tree_row(2, 1);
+        matching_child.name = "target-worker".to_string();
+        let sibling = tree_row(3, 1);
+        let other_root = tree_row(4, 0);
+        app.data.snapshot.processes = vec![parent, matching_child, sibling, other_root];
+        app.rebuild_filtered_indexes();
+        app.rebuild_tree_rows();
+        app.handle_key(key(KeyCode::Char('t')));
+        app.handle_key(key(KeyCode::Char('f')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('j'))); // NAME
+        app.handle_key(key(KeyCode::Enter)); // edit
+        for ch in "target".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // stop edit
+        app.handle_key(key(KeyCode::Esc)); // close modal
+
+        let visible: Vec<i32> = app
+            .visible_row_range()
+            .filter_map(|visible_index| app.process_index_at_visible_row(visible_index))
+            .map(|index| app.data.snapshot.processes[index].pid)
+            .collect();
+        let depths: Vec<usize> = app.tree.rows.iter().map(|row| row.depth).collect();
+
+        assert_eq!(visible, vec![1, 2]);
+        assert_eq!(depths, vec![0, 1]);
     }
 
     #[test]

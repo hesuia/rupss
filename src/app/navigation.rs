@@ -1,4 +1,5 @@
 use super::{TreeRow, ViewMode};
+#[cfg(test)]
 use crate::snapshot::ProcessRow;
 use ratatui::layout::Rect;
 
@@ -32,6 +33,7 @@ pub(super) fn ensure_visible_scroll(
     clamp_scroll_offset(next_offset, total_rows, viewport_rows)
 }
 
+#[cfg(test)]
 pub(super) fn restored_selection(selected_pid: Option<i32>, processes: &[ProcessRow]) -> usize {
     if processes.is_empty() {
         return 0;
@@ -59,13 +61,13 @@ pub(super) fn move_visible_index(
 
 pub(super) fn boundary_selection(
     view_mode: ViewMode,
-    process_count: usize,
+    flat_process_indexes: &[usize],
     tree_rows: &[TreeRow],
     to_start: bool,
 ) -> usize {
     match (view_mode, to_start) {
-        (ViewMode::Flat, true) => 0,
-        (ViewMode::Flat, false) => process_count.saturating_sub(1),
+        (ViewMode::Flat, true) => flat_process_indexes.first().copied().unwrap_or(0),
+        (ViewMode::Flat, false) => flat_process_indexes.last().copied().unwrap_or(0),
         (ViewMode::Tree, true) => tree_rows.first().map(|row| row.process_index).unwrap_or(0),
         (ViewMode::Tree, false) => tree_rows.last().map(|row| row.process_index).unwrap_or(0),
     }
@@ -172,9 +174,18 @@ mod tests {
             },
         ];
 
-        assert_eq!(boundary_selection(ViewMode::Tree, 10, &tree_rows, true), 4);
-        assert_eq!(boundary_selection(ViewMode::Tree, 10, &tree_rows, false), 7);
-        assert_eq!(boundary_selection(ViewMode::Flat, 3, &tree_rows, false), 2);
+        assert_eq!(
+            boundary_selection(ViewMode::Tree, &[0, 1, 2], &tree_rows, true),
+            4
+        );
+        assert_eq!(
+            boundary_selection(ViewMode::Tree, &[0, 1, 2], &tree_rows, false),
+            7
+        );
+        assert_eq!(
+            boundary_selection(ViewMode::Flat, &[0, 2, 4], &tree_rows, false),
+            4
+        );
     }
 
     #[test]
