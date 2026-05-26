@@ -94,6 +94,14 @@ impl AppState {
         self.view.view_mode
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.view.paused
+    }
+
+    pub(crate) fn toggle_pause(&mut self) {
+        self.view.paused = !self.view.paused;
+    }
+
     pub(crate) fn visible_columns(&self) -> Vec<ProcessColumn> {
         self.view.columns.visible_columns()
     }

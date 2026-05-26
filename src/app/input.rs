@@ -32,6 +32,7 @@ enum AppCommand {
     ReorderSelectedColumn(isize),
     ToggleSelectedColumn,
     ApplySelectedSort,
+    TogglePause,
     CloseOverlay,
     Noop,
 }
@@ -123,6 +124,10 @@ impl AppState {
                 KeyAction::Continue
             }
             AppCommand::ApplySelectedSort => self.apply_selected_sort_and_continue(),
+            AppCommand::TogglePause => {
+                self.toggle_pause();
+                KeyAction::Continue
+            }
             AppCommand::CloseOverlay => {
                 self.close_overlay();
                 KeyAction::Continue
@@ -639,6 +644,7 @@ fn key_command(
         KeyCode::Char('v') => AppCommand::ToggleColumnPicker,
         KeyCode::Char('s') => AppCommand::ToggleSortPicker,
         KeyCode::Char('f') => AppCommand::ToggleFilterModal,
+        KeyCode::Char('p') => AppCommand::TogglePause,
         _ => AppCommand::Noop,
     }
 }
@@ -716,6 +722,14 @@ mod tests {
     }
 
     #[test]
+    fn key_command_maps_pause_toggle() {
+        assert_eq!(
+            key_command(key(KeyCode::Char('p')), 3, false, false, false, false),
+            AppCommand::TogglePause
+        );
+    }
+
+    #[test]
     fn key_command_uses_column_picker_bindings_when_open() {
         assert_eq!(
             key_command(key(KeyCode::Down), 3, true, false, false, false),
@@ -768,6 +782,10 @@ mod tests {
         assert_eq!(
             key_command(key(KeyCode::Enter), 3, false, false, true, true),
             AppCommand::ToggleFilterEditing
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Char('p')), 3, false, false, true, true),
+            AppCommand::FilterPushChar('p')
         );
     }
 
@@ -1271,6 +1289,17 @@ mod tests {
         assert!(app.view.sort_picker_open);
         app.handle_key(key(KeyCode::Char('s')));
         assert!(!app.view.sort_picker_open);
+    }
+
+    #[test]
+    fn p_toggles_pause() {
+        let mut app = AppState::new(ProcfsCollector::new());
+
+        assert!(!app.is_paused());
+        app.handle_key(key(KeyCode::Char('p')));
+        assert!(app.is_paused());
+        app.handle_key(key(KeyCode::Char('p')));
+        assert!(!app.is_paused());
     }
 
     #[test]

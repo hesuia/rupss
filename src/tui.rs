@@ -148,13 +148,14 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "count {} / shown {} / agg-rss {} / agg-swap {} / sort {} / mode {} / selected {} / age {}ms",
+                "count {} / shown {} / agg-rss {} / agg-swap {} / sort {} / mode {} / status {} / selected {} / age {}ms",
                 system.process_count,
                 app.filtered_process_count(),
                 format_bytes(system.total_process_rss),
                 format_bytes(system.total_process_swap),
                 app.sort_state().label(),
                 app.view_mode().as_ref(),
+                if app.is_paused() { "paused" } else { "running" },
                 app.selected_pid()
                     .map_or("-".to_string(), |pid| pid.to_string()),
                 snapshot.captured_at.elapsed().as_millis()
@@ -225,8 +226,13 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     } else {
         " filter[-]".to_string()
     };
+    let pause_hint = if app.is_paused() {
+        "p:resume"
+    } else {
+        "p:pause"
+    };
     let title = format!(
-        "Processes  q:quit  f:filter{filter_hint}  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page"
+        "Processes  q:quit  {pause_hint}  f:filter{filter_hint}  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page"
     );
 
     let table = Table::new(
@@ -488,10 +494,18 @@ mod tests {
     };
     use crate::{app::TreeRow, collector::ProcfsCollector};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
     }
 
     #[test]
@@ -566,5 +580,19 @@ mod tests {
         let sample = buffer.cell((area.x + 2, area.y + 2)).unwrap();
 
         assert_eq!(sample.style().bg, Some(COLUMN_PICKER_BACKGROUND));
+    }
+
+    #[test]
+    fn paused_state_is_rendered() {
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = crate::app::AppState::new(ProcfsCollector::new());
+        app.handle_key(key(KeyCode::Char('p')));
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("status paused"));
+        assert!(text.contains("p:resume"));
     }
 }

@@ -46,7 +46,9 @@ fn run_app(terminal: &mut CrosstermTerminal) -> Result<(), AppError> {
         }
 
         if last_tick.elapsed() >= TICK_RATE {
-            app.refresh();
+            if !app.is_paused() {
+                app.refresh();
+            }
             last_tick = Instant::now();
         }
     }
