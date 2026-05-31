@@ -13,6 +13,7 @@ use std::{
     collections::{HashMap, HashSet},
     time::Instant,
 };
+use strum::{EnumCount, EnumIter, IntoEnumIterator};
 
 /// Mutable data captured from the system and derived from refresh cycles.
 pub(super) struct AppDataState {
@@ -100,7 +101,7 @@ impl ProcessMonitorState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumCount, EnumIter)]
 pub(crate) enum FilterRow {
     Pid,
     Ppid,
@@ -114,17 +115,9 @@ pub(crate) enum FilterRow {
 }
 
 impl FilterRow {
-    pub(crate) const ALL: [Self; 9] = [
-        Self::Pid,
-        Self::Ppid,
-        Self::Name,
-        Self::Command,
-        Self::Rss,
-        Self::Swap,
-        Self::Cpu,
-        Self::Uss,
-        Self::Pss,
-    ];
+    pub(crate) fn from_index(index: usize) -> Option<Self> {
+        Self::iter().nth(index)
+    }
 
     pub(crate) fn title(self) -> &'static str {
         match self {

@@ -1,4 +1,5 @@
 use crate::{collector::VisibleDetailRequest, snapshot::ProcessRow};
+use strum::{EnumCount, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TextFilterField {
@@ -6,7 +7,8 @@ pub(super) enum TextFilterField {
     Command,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, IntoStaticStr)]
+#[strum(serialize_all = "snake_case", ascii_case_insensitive)]
 pub(super) enum MetricFilterField {
     Rss,
     Swap,
@@ -15,41 +17,35 @@ pub(super) enum MetricFilterField {
     Pss,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumCount, EnumIter, IntoStaticStr)]
 pub(crate) enum MetricFilterOperator {
-    Equal,
-    GreaterThan,
+    #[strum(serialize = ">=")]
     GreaterThanOrEqual,
+    #[strum(serialize = ">")]
+    GreaterThan,
+    #[strum(serialize = "=")]
+    Equal,
+    #[strum(serialize = "<")]
     LessThan,
+    #[strum(serialize = "<=")]
     LessThanOrEqual,
 }
 
 impl MetricFilterOperator {
     pub(crate) fn cycle(self, delta: isize) -> Self {
-        let all = [
-            Self::GreaterThanOrEqual,
-            Self::GreaterThan,
-            Self::Equal,
-            Self::LessThan,
-            Self::LessThanOrEqual,
-        ];
-        let current = all.iter().position(|op| *op == self).unwrap_or(0) as isize;
-        let len = all.len() as isize;
+        let current = Self::iter().position(|op| op == self).unwrap_or(0) as isize;
+        let len = Self::COUNT as isize;
         let mut next = (current + delta) % len;
         if next < 0 {
             next += len;
         }
-        all[next as usize]
+        Self::iter()
+            .nth(next as usize)
+            .unwrap_or(Self::GreaterThanOrEqual)
     }
 
     pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Equal => "=",
-            Self::GreaterThan => ">",
-            Self::GreaterThanOrEqual => ">=",
-            Self::LessThan => "<",
-            Self::LessThanOrEqual => "<=",
-        }
+        self.into()
     }
 }
 
@@ -232,30 +228,24 @@ fn parse_metric_filter_token(token: &str) -> Option<FilterPredicate> {
 
 #[allow(dead_code)]
 fn split_metric_filter_token(token: &str) -> Option<(&str, MetricFilterOperator, &str)> {
-    [
-        (">=", MetricFilterOperator::GreaterThanOrEqual),
-        ("<=", MetricFilterOperator::LessThanOrEqual),
-        (">", MetricFilterOperator::GreaterThan),
-        ("<", MetricFilterOperator::LessThan),
-        ("=", MetricFilterOperator::Equal),
-    ]
-    .into_iter()
-    .find_map(|(operator_text, operator)| {
-        let (field, value) = token.split_once(operator_text)?;
-        (!field.is_empty() && !value.is_empty()).then_some((field, operator, value))
-    })
+    MetricFilterOperator::iter()
+        .filter_map(|operator| {
+            let operator_text = operator.label();
+            let (field, value) = token.split_once(operator_text)?;
+            (!field.is_empty() && !value.is_empty()).then_some((
+                field,
+                operator,
+                value,
+                operator_text.len(),
+            ))
+        })
+        .max_by_key(|(_, _, _, operator_len)| *operator_len)
+        .map(|(field, operator, value, _)| (field, operator, value))
 }
 
 #[allow(dead_code)]
 fn parse_metric_field(field: &str) -> Option<MetricFilterField> {
-    match field.to_ascii_lowercase().as_str() {
-        "rss" => Some(MetricFilterField::Rss),
-        "swap" => Some(MetricFilterField::Swap),
-        "cpu" => Some(MetricFilterField::Cpu),
-        "uss" => Some(MetricFilterField::Uss),
-        "pss" => Some(MetricFilterField::Pss),
-        _ => None,
-    }
+    field.parse().ok()
 }
 
 fn parse_cpu_value(value: &str) -> Option<f32> {
@@ -411,13 +401,7 @@ fn parse_metric_from_modal_row(
 }
 
 fn metric_field_label(field: MetricFilterField) -> &'static str {
-    match field {
-        MetricFilterField::Rss => "rss",
-        MetricFilterField::Swap => "swap",
-        MetricFilterField::Cpu => "cpu",
-        MetricFilterField::Uss => "uss",
-        MetricFilterField::Pss => "pss",
-    }
+    field.into()
 }
 
 #[cfg(test)]

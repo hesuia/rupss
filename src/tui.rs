@@ -10,6 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Axis, Block, Borders, Cell, Chart, Clear, Dataset, Paragraph, Row, Table},
 };
+use strum::IntoEnumIterator;
 
 const COLUMN_PICKER_BACKGROUND: Color = Color::Black;
 const COLUMN_PICKER_BORDER: Color = Color::Yellow;
@@ -257,12 +258,9 @@ fn render_filter_modal(frame: &mut Frame<'_>, app: &AppState) {
     frame.render_widget(Clear, area);
 
     let modal = app.filter_modal();
-    let selected_row = FilterRow::ALL
-        .get(modal.selected)
-        .copied()
-        .unwrap_or(FilterRow::Pid);
+    let selected_row = FilterRow::from_index(modal.selected).unwrap_or(FilterRow::Pid);
 
-    let rows = FilterRow::ALL.iter().enumerate().map(|(index, row)| {
+    let rows = FilterRow::iter().enumerate().map(|(index, row)| {
         let selected = index == modal.selected;
         let style = if selected {
             Style::default()

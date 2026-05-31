@@ -8,7 +8,7 @@ use super::{
 };
 use crate::snapshot::{SortDirection, SortKey, SortState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use strum::IntoEnumIterator;
+use strum::{EnumCount, IntoEnumIterator};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppCommand {
@@ -384,7 +384,7 @@ impl AppState {
         self.view.filter_modal.selected = moved_index(
             self.view.filter_modal.selected,
             delta,
-            FilterRow::ALL.len().saturating_sub(1),
+            FilterRow::COUNT.saturating_sub(1),
         );
     }
 
@@ -458,10 +458,7 @@ impl AppState {
     }
 
     fn filter_selected_row(&self) -> FilterRow {
-        FilterRow::ALL
-            .get(self.view.filter_modal.selected)
-            .copied()
-            .unwrap_or(FilterRow::Pid)
+        FilterRow::from_index(self.view.filter_modal.selected).unwrap_or(FilterRow::Pid)
     }
 
     fn filter_active_input_mut(&mut self) -> &mut String {
