@@ -1,5 +1,5 @@
 use crate::{
-    app::{AppState, ViewMode, process_table_column_widths},
+    app::{AppState, FilterRow, ProcessColumn, ViewMode},
     format::{format_bytes, format_option_bytes, format_percent},
 };
 use ratatui::{
@@ -8,8 +8,13 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Cell, Chart, Dataset, Paragraph, Row, Table},
+    widgets::{Axis, Block, Borders, Cell, Chart, Clear, Dataset, Paragraph, Row, Table},
 };
+use strum::IntoEnumIterator;
+
+const COLUMN_PICKER_BACKGROUND: Color = Color::Black;
+const COLUMN_PICKER_BORDER: Color = Color::Yellow;
+const COLUMN_PICKER_SELECTED_BACKGROUND: Color = Color::Blue;
 
 /// Draws the complete application frame.
 ///
@@ -36,23 +41,36 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     render_history_chart(frame, top[1], app, false);
     render_summary(frame, areas[1], app);
     render_process_table(frame, areas[2], app);
+    if app.is_column_picker_open() {
+        render_column_picker(frame, app);
+    }
+    if app.is_sort_picker_open() {
+        render_sort_picker(frame, app);
+    }
+    if app.is_filter_modal_open() {
+        render_filter_modal(frame, app);
+    }
+    if app.is_process_monitor_open() {
+        render_process_monitor(frame, app);
+    }
 }
 
 fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: bool) {
+    let snapshot = app.snapshot();
     let (title, points, latest_value, y_axis_upper, color) = if rss {
         (
             "RSS History",
             app.rss_chart_points(),
-            app.snapshot.system.total_process_rss,
-            chart_y_upper_bound(app.snapshot.system.mem_total),
+            snapshot.system.total_process_rss,
+            chart_y_upper_bound(snapshot.system.mem_total),
             Color::LightGreen,
         )
     } else {
         (
             "Swap History",
             app.swap_chart_points(),
-            app.snapshot.system.total_process_swap,
-            chart_y_upper_bound(app.snapshot.system.swap_total),
+            snapshot.system.total_process_swap,
+            chart_y_upper_bound(snapshot.system.swap_total),
             Color::LightBlue,
         )
     };
@@ -94,7 +112,8 @@ fn chart_y_upper_bound(total_bytes: u64) -> u64 {
 }
 
 fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let system = &app.snapshot.system;
+    let snapshot = app.snapshot();
+    let system = app.system_summary();
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -133,23 +152,22 @@ fn render_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "count {} / agg-rss {} / agg-swap {} / sort {} / mode {} / selected {} / age {}ms",
+                "count {} / shown {} / agg-rss {} / agg-swap {} / sort {} / mode {} / status {} / selected {} / age {}ms",
                 system.process_count,
+                app.filtered_process_count(),
                 format_bytes(system.total_process_rss),
                 format_bytes(system.total_process_swap),
-                app.sort_state.label(),
-                match app.view_mode {
-                    ViewMode::Flat => "flat",
-                    ViewMode::Tree => "tree",
-                },
+                app.sort_state().label(),
+                app.view_mode().as_ref(),
+                if app.is_paused() { "paused" } else { "running" },
                 app.selected_pid()
                     .map_or("-".to_string(), |pid| pid.to_string()),
-                app.snapshot.captured_at.elapsed().as_millis()
+                snapshot.captured_at.elapsed().as_millis()
             )),
         ]),
     ];
 
-    if let Some(error) = &app.last_error {
+    if let Some(error) = app.last_error_message() {
         lines.push(Line::from(vec![
             Span::styled(
                 "Last Error ",
@@ -169,58 +187,436 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
     // The viewport height decides which rows are considered visible and therefore
     // which PIDs are eligible for `smaps_rollup` collection.
     app.set_viewport_rows(area.height.saturating_sub(3) as usize);
-    let header = Row::new([
-        "PID", "PPID", "OWNER", "THREAD", "NAME", "COMMAND", "RSS", "USS", "PSS", "SWAP", "CPU",
-    ])
-    .style(
+    let columns = app.visible_columns();
+    let header = Row::new(columns.iter().map(|column| Cell::from(column.title()))).style(
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     );
 
-    let visible_rows = app.visible_row_entries();
-    let rows = visible_rows.iter().enumerate().map(|(visible_idx, entry)| {
-        let row = &app.snapshot.processes[entry.process_index];
-        let style = if app.selected_visible_index() == Some(app.scroll_offset + visible_idx) {
+    let selected_visible_index = app.selected_visible_index();
+    let rows = app.visible_row_range().map(|visible_index| {
+        let process_index = app
+            .process_index_at_visible_row(visible_index)
+            .expect("visible row exists");
+        let row = app.process_row(process_index).expect("visible row exists");
+        let style = if selected_visible_index == Some(visible_index) {
             Style::default().bg(Color::DarkGray).fg(Color::White)
         } else {
             Style::default()
         };
-        let name_cell = match app.view_mode {
-            ViewMode::Flat => row.name.clone(),
-            ViewMode::Tree => format_tree_name(entry, &row.name),
+        let name_cell = match (app.view_mode(), app.tree_row_at_visible_row(visible_index)) {
+            (ViewMode::Flat, _) => row.name.clone(),
+            (ViewMode::Tree, Some(tree_row)) => format_tree_name(tree_row, &row.name),
+            (ViewMode::Tree, None) => row.name.clone(),
         };
 
-        Row::new(vec![
-            Cell::from(row.pid.to_string()),
-            Cell::from(row.ppid.to_string()),
-            Cell::from(app.owner_name(row.owner_uid)),
-            Cell::from(row.threads.to_string()),
-            Cell::from(name_cell),
-            Cell::from(row.command.clone()),
-            Cell::from(format_bytes(row.rss_bytes)),
-            option_cell(row.uss_bytes),
-            option_cell(row.pss_bytes),
-            Cell::from(format_bytes(row.visible_swap_bytes())),
-            Cell::from(format_percent(row.cpu_percent)),
-        ])
+        Row::new(
+            columns
+                .iter()
+                .map(|column| process_table_cell(*column, row, &name_cell, app))
+                .collect::<Vec<_>>(),
+        )
         .style(style)
     });
 
+    let filter_hint = if app.is_filter_modal_open() {
+        let modal = app.filter_modal();
+        let mode = if modal.editing { "edit" } else { "nav" };
+        let err = if modal.error.is_some() { " !" } else { "" };
+        format!(" filter[{mode}]{err}")
+    } else if app.is_filter_active() {
+        " filter[on]".to_string()
+    } else {
+        " filter[-]".to_string()
+    };
+    let pause_hint = if app.is_paused() {
+        "p:resume"
+    } else {
+        "p:pause"
+    };
+    let title = format!(
+        "Processes  q:quit  {pause_hint}  Enter:monitor  f:filter{filter_hint}  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page"
+    );
+
     let table = Table::new(
         rows,
-        process_table_column_widths(app.view_mode).map(Constraint::Length),
+        columns
+            .iter()
+            .map(|column| Constraint::Length(column.width(app.view_mode())))
+            .collect::<Vec<_>>(),
     )
     .header(header)
-    .block(
-        Block::default().title(
-                "Processes  q:quit  t:tree  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page  i/p/o/n/m/r/s/c:sort",
-            )
-            .borders(Borders::ALL),
-    )
+    .block(Block::default().title(title).borders(Borders::ALL))
     .column_spacing(crate::app::PROCESS_TABLE_COLUMN_SPACING);
 
     frame.render_widget(table, area);
+}
+
+fn render_filter_modal(frame: &mut Frame<'_>, app: &AppState) {
+    let area = centered_rect(frame.area(), 56, 16);
+    frame.render_widget(Clear, area);
+
+    let modal = app.filter_modal();
+    let selected_row = FilterRow::from_index(modal.selected).unwrap_or(FilterRow::Pid);
+
+    let rows = FilterRow::iter().enumerate().map(|(index, row)| {
+        let selected = index == modal.selected;
+        let style = if selected {
+            Style::default()
+                .bg(COLUMN_PICKER_SELECTED_BACKGROUND)
+                .fg(Color::White)
+        } else {
+            Style::default().bg(COLUMN_PICKER_BACKGROUND)
+        };
+
+        let (op, value) = match row {
+            FilterRow::Pid => ("", modal.pid.as_str()),
+            FilterRow::Ppid => ("", modal.ppid.as_str()),
+            FilterRow::Name => ("", modal.name.as_str()),
+            FilterRow::Command => ("", modal.command.as_str()),
+            FilterRow::Rss => (modal.rss_op.label(), modal.rss_value.as_str()),
+            FilterRow::Swap => (modal.swap_op.label(), modal.swap_value.as_str()),
+            FilterRow::Cpu => (modal.cpu_op.label(), modal.cpu_value.as_str()),
+            FilterRow::Uss => (modal.uss_op.label(), modal.uss_value.as_str()),
+            FilterRow::Pss => (modal.pss_op.label(), modal.pss_value.as_str()),
+        };
+
+        let title = row.title();
+        let value_display = if value.is_empty() { "-" } else { value };
+        let op_display = if op.is_empty() { "" } else { op };
+        let line = if row.is_metric() {
+            format!("{:<8} {:<2} {}", title, op_display, value_display)
+        } else {
+            format!("{:<8} {}", title, value_display)
+        };
+
+        Row::new(vec![Cell::from(line)]).style(style)
+    });
+
+    let mut title = format!(
+        "Filter ({})  j/k:move  Enter:edit  h/l:op  Esc:close",
+        if modal.editing { "edit" } else { "nav" }
+    );
+    if let Some(err) = modal.error.as_deref() {
+        title.push_str(&format!("  error: {err}"));
+    } else if selected_row.is_metric() {
+        title.push_str("  units: B/KB/MB/GB (1024-base), cpu: % optional");
+    }
+
+    let table = Table::new(rows, [Constraint::Min(52)]).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .style(Style::default().bg(COLUMN_PICKER_BACKGROUND))
+            .border_style(Style::default().fg(COLUMN_PICKER_BORDER))
+            .title_style(
+                Style::default()
+                    .fg(COLUMN_PICKER_BORDER)
+                    .bg(COLUMN_PICKER_BACKGROUND)
+                    .add_modifier(Modifier::BOLD),
+            ),
+    );
+
+    frame.render_widget(table, area);
+}
+
+fn render_sort_picker(frame: &mut Frame<'_>, app: &AppState) {
+    let area = centered_rect(frame.area(), 36, 12);
+    frame.render_widget(Clear, area);
+    let sort_state = app.sort_state();
+    let sort_keys = app.sort_picker_keys();
+
+    let rows = sort_keys.iter().enumerate().map(|(index, sort_key)| {
+        let selected = index == app.sort_picker_index();
+        let active = *sort_key == sort_state.key;
+        let active_mark = if active { ">" } else { " " };
+        let direction = if active {
+            sort_state.direction
+        } else {
+            sort_key.default_direction()
+        };
+        let label = format!(
+            "{active_mark} {:<8} {}",
+            sort_key.title(),
+            direction.as_ref()
+        );
+        let style = if selected {
+            Style::default()
+                .bg(COLUMN_PICKER_SELECTED_BACKGROUND)
+                .fg(Color::White)
+        } else if active {
+            Style::default()
+                .bg(COLUMN_PICKER_BACKGROUND)
+                .fg(Color::Yellow)
+        } else {
+            Style::default().bg(COLUMN_PICKER_BACKGROUND)
+        };
+        Row::new(vec![Cell::from(label)]).style(style)
+    });
+
+    let table = Table::new(rows, [Constraint::Min(28)])
+        .block(
+            Block::default()
+                .title("Sort  j/k:select  Enter/Space:apply  Esc/s:close")
+                .borders(Borders::ALL)
+                .style(Style::default().bg(COLUMN_PICKER_BACKGROUND))
+                .border_style(Style::default().fg(COLUMN_PICKER_BORDER))
+                .title_style(
+                    Style::default()
+                        .fg(COLUMN_PICKER_BORDER)
+                        .bg(COLUMN_PICKER_BACKGROUND)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
+        .column_spacing(0);
+
+    frame.render_widget(table, area);
+}
+
+fn process_table_cell(
+    column: ProcessColumn,
+    row: &crate::snapshot::ProcessRow,
+    name_cell: &str,
+    app: &AppState,
+) -> Cell<'static> {
+    match column {
+        ProcessColumn::Pid => Cell::from(row.pid.to_string()),
+        ProcessColumn::Ppid => Cell::from(row.ppid.to_string()),
+        ProcessColumn::Owner => Cell::from(app.owner_name(row.owner_uid)),
+        ProcessColumn::Thread => Cell::from(row.threads.to_string()),
+        ProcessColumn::Name => Cell::from(name_cell.to_owned()),
+        ProcessColumn::Command => Cell::from(row.command.clone()),
+        ProcessColumn::Rss => Cell::from(format_bytes(row.rss_bytes)),
+        ProcessColumn::Uss => option_cell(row.uss_bytes),
+        ProcessColumn::Pss => option_cell(row.pss_bytes),
+        ProcessColumn::Swap => Cell::from(format_bytes(row.swap_bytes)),
+        ProcessColumn::Cpu => Cell::from(format_percent(row.cpu_percent)),
+    }
+}
+
+fn render_process_monitor(frame: &mut Frame<'_>, app: &AppState) {
+    let Some(monitor) = app.process_monitor() else {
+        return;
+    };
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(6)])
+        .split(area);
+
+    let status = if monitor.missing {
+        "missing"
+    } else {
+        "running"
+    };
+    let latest = &monitor.latest;
+    let summary = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("PID {} ", monitor.pid),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("{}  {}", monitor.name, monitor.command)),
+        ]),
+        Line::from(format!(
+            "status {status} / samples {} / RSS {} / USS {} / PSS {} / SWAP {} / CPU {} / THREADS {} / Esc:close / q:quit",
+            monitor.history.len(),
+            format_bytes(latest.rss_bytes),
+            format_option_bytes(latest.uss_bytes),
+            format_option_bytes(latest.pss_bytes),
+            format_bytes(latest.swap_bytes),
+            format_percent(latest.cpu_percent),
+            latest.threads,
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(summary).block(
+            Block::default()
+                .title("Process Monitor")
+                .borders(Borders::ALL),
+        ),
+        vertical[0],
+    );
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+        ])
+        .split(vertical[1]);
+    let areas = rows
+        .iter()
+        .flat_map(|row| {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(*row)
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+
+    render_monitor_chart(
+        frame,
+        areas[0],
+        "RSS",
+        app.process_monitor_rss_points(),
+        format_bytes(latest.rss_bytes),
+        Color::LightGreen,
+        format_bytes,
+    );
+    render_monitor_chart(
+        frame,
+        areas[1],
+        "USS",
+        app.process_monitor_uss_points(),
+        format_option_bytes(latest.uss_bytes).to_string(),
+        Color::Green,
+        format_bytes,
+    );
+    render_monitor_chart(
+        frame,
+        areas[2],
+        "PSS",
+        app.process_monitor_pss_points(),
+        format_option_bytes(latest.pss_bytes).to_string(),
+        Color::Cyan,
+        format_bytes,
+    );
+    render_monitor_chart(
+        frame,
+        areas[3],
+        "SWAP",
+        app.process_monitor_swap_points(),
+        format_bytes(latest.swap_bytes),
+        Color::LightBlue,
+        format_bytes,
+    );
+    render_monitor_chart(
+        frame,
+        areas[4],
+        "CPU",
+        app.process_monitor_cpu_points(),
+        format_percent(latest.cpu_percent),
+        Color::LightRed,
+        |value| format_percent(value as f32),
+    );
+    render_monitor_chart(
+        frame,
+        areas[5],
+        "THREADS",
+        app.process_monitor_threads_points(),
+        latest.threads.to_string(),
+        Color::Magenta,
+        |value| value.to_string(),
+    );
+}
+
+fn render_monitor_chart(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    points: Vec<(f64, f64)>,
+    latest: String,
+    color: Color,
+    format_axis: impl Fn(u64) -> String,
+) {
+    let x_max = points.last().map(|(x, _)| *x).unwrap_or(180.0).max(1.0);
+    let y_max = points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(1.0_f64, f64::max)
+        .ceil();
+    let y_label = format_axis(y_max as u64);
+    let datasets = vec![
+        Dataset::default()
+            .name(title)
+            .marker(symbols::Marker::Braille)
+            .style(Style::default().fg(color))
+            .graph_type(ratatui::widgets::GraphType::Line)
+            .data(&points),
+    ];
+    let chart = Chart::new(datasets)
+        .block(
+            Block::default()
+                .title(format!("{title}  {latest}"))
+                .borders(Borders::ALL),
+        )
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, x_max])
+                .labels([Line::from("-3m"), Line::from("now")]),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, y_max])
+                .labels([Line::from("0"), Line::from(y_label)]),
+        );
+
+    frame.render_widget(chart, area);
+}
+
+fn render_column_picker(frame: &mut Frame<'_>, app: &AppState) {
+    let area = centered_rect(frame.area(), 36, 15);
+    frame.render_widget(Clear, area);
+    let visible_columns = app.visible_columns();
+    let rows = app
+        .column_picker_columns()
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let selected = index == app.column_picker_index();
+            let enabled = visible_columns.contains(column);
+            let toggle_mark = if enabled { "[x]" } else { "[ ]" };
+            let mut label = format!("{toggle_mark} {}", column.title());
+            if !column.is_toggleable() {
+                label.push_str(" (fixed)");
+            }
+            let style = if selected {
+                Style::default()
+                    .bg(COLUMN_PICKER_SELECTED_BACKGROUND)
+                    .fg(Color::White)
+            } else if enabled {
+                Style::default().bg(COLUMN_PICKER_BACKGROUND)
+            } else {
+                Style::default()
+                    .bg(COLUMN_PICKER_BACKGROUND)
+                    .fg(Color::DarkGray)
+            };
+            Row::new(vec![Cell::from(label)]).style(style)
+        });
+
+    let table = Table::new(rows, [Constraint::Min(28)])
+        .block(
+            Block::default()
+                .title("Columns  j/k:select  Shift+Up/Down or J/K:move  Enter/Space:toggle  Esc/v:close")
+                .borders(Borders::ALL)
+                .style(Style::default().bg(COLUMN_PICKER_BACKGROUND))
+                .border_style(Style::default().fg(COLUMN_PICKER_BORDER))
+                .title_style(
+                    Style::default()
+                        .fg(COLUMN_PICKER_BORDER)
+                        .bg(COLUMN_PICKER_BACKGROUND)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
+        .column_spacing(0);
+
+    frame.render_widget(table, area);
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let popup_width = width.min(area.width.saturating_sub(2)).max(1);
+    let popup_height = height.min(area.height.saturating_sub(2)).max(1);
+    let x = area.x + area.width.saturating_sub(popup_width) / 2;
+    let y = area.y + area.height.saturating_sub(popup_height) / 2;
+    Rect::new(x, y, popup_width, popup_height)
 }
 
 /// Styles an optional byte value for display in the process table.
@@ -261,8 +657,40 @@ fn format_tree_name(entry: &crate::app::TreeRow, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{chart_y_upper_bound, format_tree_name};
-    use crate::app::TreeRow;
+    use super::{
+        COLUMN_PICKER_BACKGROUND, centered_rect, chart_y_upper_bound, format_tree_name, render,
+    };
+    use crate::{app::TreeRow, collector::ProcfsCollector, snapshot::ProcessRow};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    fn sample_row(pid: i32) -> ProcessRow {
+        ProcessRow {
+            pid,
+            ppid: 1,
+            owner_uid: 0,
+            threads: 4,
+            name: "name".to_string(),
+            command: "cmd".to_string(),
+            rss_bytes: 1024,
+            uss_bytes: Some(512),
+            pss_bytes: Some(768),
+            swap_bytes: 256,
+            cpu_percent: 12.5,
+        }
+    }
 
     #[test]
     fn chart_upper_bound_uses_total_when_non_zero() {
@@ -312,5 +740,64 @@ mod tests {
 
         assert_eq!(format_tree_name(&parent, "bash"), "│  ├─[+] bash");
         assert_eq!(format_tree_name(&leaf, "worker"), "│     └─ worker");
+    }
+
+    #[test]
+    fn centered_rect_stays_within_frame() {
+        assert_eq!(
+            centered_rect(Rect::new(0, 0, 20, 8), 36, 15),
+            Rect::new(1, 1, 18, 6)
+        );
+    }
+
+    #[test]
+    fn column_picker_clears_background_from_selected_row() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = crate::app::AppState::new(ProcfsCollector::new());
+        app.handle_key(key(KeyCode::Char('v')));
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let area = centered_rect(Rect::new(0, 0, 80, 24), 36, 15);
+        let sample = buffer.cell((area.x + 2, area.y + 2)).unwrap();
+
+        assert_eq!(sample.style().bg, Some(COLUMN_PICKER_BACKGROUND));
+    }
+
+    #[test]
+    fn paused_state_is_rendered() {
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = crate::app::AppState::new(ProcfsCollector::new());
+        app.handle_key(key(KeyCode::Char('p')));
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("status paused"));
+        assert!(text.contains("p:resume"));
+    }
+
+    #[test]
+    fn process_monitor_overlay_renders_summary_and_chart_titles() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = crate::app::AppState::new(ProcfsCollector::new());
+        app.replace_processes_for_test(vec![sample_row(42)]);
+        app.handle_key(key(KeyCode::Enter));
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Process Monitor"));
+        assert!(text.contains("PID 42"));
+        assert!(text.contains("RSS"));
+        assert!(text.contains("USS"));
+        assert!(text.contains("PSS"));
+        assert!(text.contains("SWAP"));
+        assert!(text.contains("CPU"));
+        assert!(text.contains("THREADS"));
     }
 }

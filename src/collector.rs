@@ -1,4 +1,5 @@
 use crate::{
+    error::CollectorError,
     format::truncate_owned,
     snapshot::{HistoryPoint, ProcessRow, Snapshot, SystemSummary},
 };
@@ -37,8 +38,19 @@ pub struct DetailedMemorySample {
     pub uss_bytes: Option<u64>,
     /// Proportional set size in bytes.
     pub pss_bytes: Option<u64>,
-    /// Swap usage reported by `smaps_rollup`, in bytes.
-    pub swap_bytes: Option<u64>,
+}
+
+/// Selects which expensive memory metrics should be populated from `smaps_rollup`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VisibleDetailRequest {
+    pub uss: bool,
+    pub pss: bool,
+}
+
+impl VisibleDetailRequest {
+    pub fn needs_any(self) -> bool {
+        self.uss || self.pss
+    }
 }
 
 /// Abstracts process and memory collection behind a swappable interface.
@@ -62,13 +74,17 @@ pub trait SystemCollector {
         &self,
         previous_cpu: &HashMap<i32, CpuSample>,
         now: Instant,
-    ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), procfs::ProcError>;
+    ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), CollectorError>;
 
     /// Collects heavier memory details only for the currently visible PIDs.
     ///
     /// Implementations should keep this path narrow because it may read
     /// expensive sources such as `smaps_rollup`. The caller decides visibility.
-    fn collect_visible_memory_details(&self, pids: &[i32]) -> HashMap<i32, DetailedMemorySample>;
+    fn collect_visible_memory_details(
+        &self,
+        pids: &[i32],
+        request: VisibleDetailRequest,
+    ) -> HashMap<i32, DetailedMemorySample>;
 }
 
 /// `procfs`-backed collector implementation for Linux.
@@ -139,8 +155,7 @@ impl ProcfsCollector {
             rss_bytes,
             uss_bytes: None,
             pss_bytes: None,
-            base_swap_bytes: swap_bytes,
-            detailed_swap_bytes: None,
+            swap_bytes,
             cpu_percent,
         };
 
@@ -159,29 +174,22 @@ impl SystemCollector for ProcfsCollector {
         &self,
         previous_cpu: &HashMap<i32, CpuSample>,
         now: Instant,
-    ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), procfs::ProcError> {
-        let meminfo = Meminfo::current()?;
-        let mut processes = Vec::new();
-        let mut next_cpu = HashMap::new();
-        let mut total_process_rss = 0u64;
-        let mut total_process_swap = 0u64;
-
-        for process in all_processes()? {
-            let Ok(process) = process else {
-                continue;
-            };
-
-            let Some((row, cpu_sample)) = self.collect_one_process(process, previous_cpu, now)
-            else {
-                continue;
-            };
-
-            total_process_rss = total_process_rss.saturating_add(row.rss_bytes);
-            total_process_swap = total_process_swap.saturating_add(row.base_swap_bytes);
-            next_cpu.insert(row.pid, cpu_sample);
-            processes.push(row);
-        }
-
+    ) -> Result<(Snapshot, HashMap<i32, CpuSample>, HistoryPoint), CollectorError> {
+        let meminfo = Meminfo::current().map_err(CollectorError::ReadMeminfo)?;
+        let (processes, next_cpu, total_process_rss, total_process_swap) = all_processes()
+            .map_err(CollectorError::ListProcesses)?
+            .filter_map(|proc| proc.ok())
+            .filter_map(|proc| self.collect_one_process(proc, previous_cpu, now))
+            .fold(
+                (Vec::new(), HashMap::new(), 0u64, 0u64),
+                |(mut rows, mut cpu_cache, total_rss, total_swap), (row, cpu_sample)| {
+                    let total_rss = total_rss.saturating_add(row.rss_bytes);
+                    let total_swap = total_swap.saturating_add(row.swap_bytes);
+                    cpu_cache.insert(row.pid, cpu_sample);
+                    rows.push(row);
+                    (rows, cpu_cache, total_rss, total_swap)
+                },
+            );
         let mem_available = meminfo.mem_available;
         let mem_used = meminfo
             .mem_total
@@ -215,40 +223,38 @@ impl SystemCollector for ProcfsCollector {
         ))
     }
 
-    fn collect_visible_memory_details(&self, pids: &[i32]) -> HashMap<i32, DetailedMemorySample> {
-        let mut details = HashMap::with_capacity(pids.len());
-
-        for pid in pids {
-            // Detailed memory metrics are intentionally loaded only for the visible rows.
-            let Ok(process) = Process::new(*pid) else {
-                continue;
-            };
-            let Ok(rollup) = process.smaps_rollup() else {
-                continue;
-            };
-            let Some(memory_map) = rollup.memory_map_rollup.0.first() else {
-                continue;
-            };
-            let map = &memory_map.extension.map;
-            let uss_bytes = map
-                .get("Private_Clean")
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(map.get("Private_Dirty").copied().unwrap_or(0));
-            let pss_bytes = map.get("Pss").copied();
-            let swap_bytes = map.get("Swap").copied();
-
-            details.insert(
-                *pid,
-                DetailedMemorySample {
-                    uss_bytes: Some(uss_bytes),
-                    pss_bytes,
-                    swap_bytes,
-                },
-            );
+    fn collect_visible_memory_details(
+        &self,
+        pids: &[i32],
+        request: VisibleDetailRequest,
+    ) -> HashMap<i32, DetailedMemorySample> {
+        if !request.needs_any() {
+            return HashMap::new();
         }
 
-        details
+        pids.iter()
+            .filter_map(|pid| {
+                // Detailed memory metrics are intentionally loaded only for the visible rows.
+                let process = Process::new(*pid).ok()?;
+                let rollup = process.smaps_rollup().ok()?;
+                let map = &rollup.memory_map_rollup.0.first()?.extension.map;
+                let uss_bytes = request.uss.then(|| {
+                    map.get("Private_Clean")
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(map.get("Private_Dirty").copied().unwrap_or(0))
+                });
+                let pss_bytes = request.pss.then(|| map.get("Pss").copied()).flatten();
+
+                Some((
+                    *pid,
+                    DetailedMemorySample {
+                        uss_bytes,
+                        pss_bytes,
+                    },
+                ))
+            })
+            .collect()
     }
 }
 

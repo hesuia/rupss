@@ -4,32 +4,42 @@
 Lightweight and efficient, it collects data from `/proc` and renders it in a terminal UI.
 
 ## Project Structure & Module Organization
-- `src/` contains all Rust source code. Each module is split by responsibility:
-  - `app.rs`: state and event loop
-  - `collector.rs`: procfs collection. can be extended to other sources in the future.
-  - `tui.rs`: rendering tui
-  - `snapshot.rs`: data model
-  - `history.rs`: ring buffer for historical, fixed-size data
-  - `format.rs`: formatting utilities(e.g., human-readable byte sizes)
-  - `main.rs`: entrypoint
-- Tests are unit tests colocated in each module under `#[cfg(test)]`.
-- No static assets or external config files are required to run locally.
+- `src/main.rs` boots the app and calls `app::run()`.
+- `src/app.rs` owns the main event loop and high-level app state.
+- `src/app/` contains UI behavior and state helpers (input, navigation, sorting, tree view, etc.).
+- `src/collector.rs` reads process/memory data from `/proc` (Linux-only).
+- `src/tui.rs` renders the terminal UI (Ratatui/Crossterm).
+- `src/snapshot.rs`, `src/history.rs`, `src/format.rs` hold the core data model, history buffers, and formatting utilities.
+- Tests are unit tests colocated with modules under `#[cfg(test)]` (no separate `tests/` directory).
 
-## Basic Commands
-- `cargo build` compiles the binary.
-- `cargo run` launches the TUI.
-- `cargo check` type-checks quickly without producing a binary. Use this for validating changes.
-- `cargo test` runs unit tests.
-- `cargo fmt` formats code according to Rust style guidelines.
-- `cargo clippy` runs lints to catch common mistakes and enforce idiomatic Rust.
+## Main Dependencies
+- `ratatui` + `crossterm`: terminal rendering and input/event handling.
+- `procfs`: process and memory data sourced from `/proc`.
+- `users`: for mapping UIDs to usernames.
+- `anyhow`/`thiserror`: error propagation with context and typed errors where useful.
+- other utilities:
+  - `compact_str` for efficient string handling.
+  - `strum` for string interning (e.g., process names).
+## Build, Test, and Development Commands
+- `cargo run` builds and launches the TUI in debug mode.
+- `cargo build` builds a debug binary.
+- `cargo build --release` builds an optimized binary at `target/release/rupss`.
+- `cargo check` runs a fast type-check without producing a binary.
+- `cargo test` runs the unit test suite.
+- `cargo fmt` formats code with Rustfmt; run before pushing and ensure no formatting changes are pending.
+- `cargo clippy` runs lints; prefer keeping the code warning-free.
+
+## TUI Behavior (High Level)
+- Supports a flat list view and an expandable process tree view.
+- Process table is keyboard-driven and supports sorting (PID/owner/name/RSS/swap/CPU%, etc.).
+- Some details come from `smaps_rollup` and may be unavailable for non-owned processes.
 
 ## Coding Style & Naming Conventions
-- Follow standard Rust formatting (`rustfmt`). Use 4-space indentation.
-- Public APIs should have clear Rustdoc comments (`///`) explaining purpose,
-  inputs, outputs, and any non-obvious behavior.
-- Naming: `CamelCase` for types, `snake_case` for functions/variables,
-  `SCREAMING_SNAKE_CASE` for constants. Keep module names short and topical
-  (e.g., `collector`, `snapshot`, `tui`).
+- Use standard Rustfmt formatting (4-space indentation; no manual alignment).
+- Prefer explicit error handling over panics: use `Result`/`Option` + `?`; avoid `unwrap()`/`expect()` outside tests.
+- Keep module boundaries sharp: `/proc` parsing in `collector`, rendering in `tui`, UI logic in `app/`.
+- Naming follows Rust conventions: `CamelCase` types, `snake_case` functions/vars, `SCREAMING_SNAKE_CASE` constants.
+- Add doc comments (`///`) to public items and complex logic; internal helper functions can have inline comments as needed.
 
 ## rust coding conventions:
 - Use `Result<T, E>` and `Option<T>` (+ `?`) for error handling and optional values instead of panicking.
@@ -37,28 +47,23 @@ Lightweight and efficient, it collects data from `/proc` and renders it in a ter
 - Use pattern matching (`match`, `if let`, `let else`) to handle different cases explicitly, especially for enums and error handling.avoid complex nested `if` statements; prefer these constructions, early returns or pattern matching.
 - Avoid `unwrap()` and `expect()` in production code; handle errors gracefully.
 - Use iterators and combinators (`map`, `filter`, `fold`, `filter_map` etc.) for collection processing instead of manual loops where appropriate.
+  - Split closures to prevent them from becoming too large.
 - Prefer immutable data structures and minimize mutable state. Use `mut` only when necessary.
-  - In `app.rs`, it's acceptable to use `mut` to some extent, but avoid overusing or using it unnecessarily.
-- Also, follow standard Rust coding conventions to write code that is easy to read and maintain.
+  - In `app.rs`, it's acceptable to use `mut` to some extent, but avoid overusing.
+  - You can use `mut` for parts closely related to TUI, but for UI-independent parts, avoid using `mut` as much as possible and extract them into functions or methods so they can be tested.
+- follow standard Rust coding conventions to write code that is easy to read and maintain.
 
 ## Testing Guidelines
-Once changes are made, ensure they are correct.
-Unless testing is absolutely essential or the code relates to TUI, we generally add tests for all functions and methods, especially those with complex logic or edge cases.
-- Tests use Rust’s built-in test framework (`cargo test`).
-- Prefer focused unit tests placed next to the code under test.
-- Naming: descriptive test function names using `snake_case`
-  (e.g., `calculates_cpu_from_tick_delta`).
+- Add focused unit tests for non-UI logic (parsing, sorting, tree operations, formatting).
+- Use descriptive `snake_case` test names (e.g., `sorts_by_rss_descending`).
 
 ## Commit & Pull Request Guidelines
-- Commit messages in history are short, imperative, and specific
-  (e.g., "refactor: extract snapshot logic into separate module", "bugfix: handle missing smaps_rollup gracefully").
-- Keep commits small and scoped to a single change.
-- PRs should include:
-  - A concise summary of behavior changes.
-  - How to test (commands and expected outcome).
-  - Any user-visible UI changes called out explicitly.
+- Commit subjects are short and imperative; common prefixes include `refactor:` and `BugFix:` when helpful.
+- Keep PRs small and scoped. Include:
+  - What changed and why
+  - How to test (e.g., `cargo test`, then `cargo run` on Linux)
+  - Screenshots/recordings if UI behavior changes
 
-## Configuration & Environment Notes
-- Linux-only: relies on `/proc` and `smaps_rollup`.
-- Running as non-root may limit access to some process details; the UI should
-  degrade gracefully in those cases.
+## Security & Environment Notes
+- Requirements: Linux + a Rust toolchain that supports the 2024 edition.
+- Linux-only: relies on `/proc` and `/proc/<pid>/smaps_rollup`; access may be denied for non-owned processes. Handle failures gracefully and keep the UI responsive.

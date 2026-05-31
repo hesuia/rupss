@@ -1,9 +1,9 @@
 use compact_str::{CompactString, format_compact};
 use std::time::Instant;
-use strum::AsRefStr;
+use strum::{AsRefStr, EnumIter, IntoStaticStr};
 
 /// Sort keys supported by the process table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum SortKey {
     /// Sort by process ID.
@@ -25,6 +25,20 @@ pub enum SortKey {
 }
 
 impl SortKey {
+    /// Returns the human-readable column label for this sort key.
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::Pid => "PID",
+            Self::Ppid => "PPID",
+            Self::Owner => "OWNER",
+            Self::Name => "NAME",
+            Self::Command => "COMMAND",
+            Self::Rss => "RSS",
+            Self::Swap => "SWAP",
+            Self::Cpu => "CPU",
+        }
+    }
+
     /// Returns the default sort direction for this key.
     pub fn default_direction(&self) -> SortDirection {
         use SortKey::*;
@@ -35,7 +49,7 @@ impl SortKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, IntoStaticStr)]
 pub enum SortDirection {
     /// Sort in ascending order (e.g. lowest to highest).
     #[strum(serialize = "asc")]
@@ -43,6 +57,16 @@ pub enum SortDirection {
     /// Sort in descending order (e.g. highest to lowest).
     #[strum(serialize = "desc")]
     Descending,
+}
+
+impl SortDirection {
+    /// Toggles the sort direction between ascending and descending.
+    pub fn toggle(self) -> Self {
+        match self {
+            SortDirection::Ascending => SortDirection::Descending,
+            SortDirection::Descending => SortDirection::Ascending,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,19 +83,30 @@ impl SortState {
         Self { key, direction }
     }
 
+    /// Creates a new `SortState` with the given key and its default direction.
+    #[allow(dead_code)]
+    fn default_for_key(key: SortKey) -> Self {
+        Self::new(key, key.default_direction())
+    }
+
     /// Toggles the sort direction between ascending and descending.
-    pub fn toggle(&mut self) {
-        self.direction = match self.direction {
-            SortDirection::Ascending => SortDirection::Descending,
-            SortDirection::Descending => SortDirection::Ascending,
-        };
+    pub fn toggle_direction(&mut self) {
+        self.direction = self.direction.toggle();
+    }
+
+    /// Toggles the sort key. If the new key is the same as the current key, also toggles the direction.
+    pub fn toggle_key(&mut self, new_key: SortKey) {
+        if self.key == new_key {
+            self.toggle_direction();
+        } else {
+            self.key = new_key;
+            self.direction = new_key.default_direction();
+        }
     }
 
     /// Returns a human-readable label for the current sort state, combining the key and direction.
     pub fn label(&self) -> CompactString {
-        let k = self.key.as_ref();
-        let d = self.direction.as_ref();
-        format_compact!("{k} {d}")
+        format_compact!("{} {}", self.key.as_ref(), self.direction.as_ref())
     }
 }
 
@@ -136,21 +171,10 @@ pub struct ProcessRow {
     pub uss_bytes: Option<u64>,
     /// Proportional set size in bytes, populated from `smaps_rollup` when visible.
     pub pss_bytes: Option<u64>,
-    /// Cheap swap estimate from `/proc/<pid>/status`, in bytes.
-    pub base_swap_bytes: u64,
-    /// Swap value from `smaps_rollup`, in bytes, when available.
-    pub detailed_swap_bytes: Option<u64>,
+    /// Swap usage from `/proc/<pid>/status`, in bytes.
+    pub swap_bytes: u64,
     /// CPU percentage calculated from two samples.
     pub cpu_percent: f32,
-}
-
-impl ProcessRow {
-    /// Returns the best swap value currently available for display.
-    ///
-    /// `smaps_rollup` data wins when it has already been loaded for this row.
-    pub fn visible_swap_bytes(&self) -> u64 {
-        self.detailed_swap_bytes.unwrap_or(self.base_swap_bytes)
-    }
 }
 
 /// Immutable view of one collection cycle.
