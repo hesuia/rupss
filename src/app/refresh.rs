@@ -1,7 +1,7 @@
 use super::AppState;
 use crate::{
     collector::{DetailedMemorySample, SystemCollector, VisibleDetailRequest},
-    snapshot::HistoryPoint,
+    snapshot::{HistoryPoint, ProcessRow},
 };
 use std::collections::HashMap;
 use std::time::Instant;
@@ -28,6 +28,7 @@ impl AppState {
                 self.sort_snapshot_processes(&mut snapshot.processes);
                 self.data.snapshot = snapshot;
                 self.populate_filter_details();
+                self.record_process_monitor_sample();
                 self.rebuild_filtered_indexes();
                 self.rebuild_tree_rows();
                 self.restore_selection(selected_pid, false);
@@ -95,6 +96,101 @@ impl AppState {
                 row.pss_bytes = detail.pss_bytes;
             }
         }
+    }
+
+    pub(super) fn populate_process_monitor_details(&mut self, pid: i32) {
+        self.populate_memory_details(
+            &[pid],
+            VisibleDetailRequest {
+                uss: true,
+                pss: true,
+            },
+        );
+    }
+
+    pub(super) fn start_process_monitor_for_selected(&mut self) {
+        let Some(selected) = self.selected_process_row().cloned() else {
+            return;
+        };
+
+        self.view.column_picker_open = false;
+        self.view.sort_picker_open = false;
+        self.view.filter_modal.open = false;
+        self.view.filter_modal.editing = false;
+
+        self.populate_process_monitor_details(selected.pid);
+        let row = self
+            .data
+            .snapshot
+            .processes
+            .iter()
+            .find(|row| row.pid == selected.pid)
+            .cloned()
+            .unwrap_or(selected);
+
+        self.data.process_monitor = Some(super::state::ProcessMonitorState::new(
+            &row,
+            super::HISTORY_CAPACITY,
+        ));
+        self.view.process_monitor_open = true;
+    }
+
+    pub(super) fn close_process_monitor_overlay(&mut self) {
+        self.view.process_monitor_open = false;
+    }
+
+    fn record_process_monitor_sample(&mut self) {
+        let Some(pid) = self
+            .data
+            .process_monitor
+            .as_ref()
+            .map(|monitor| monitor.pid)
+        else {
+            return;
+        };
+
+        let Some(row) = self
+            .data
+            .snapshot
+            .processes
+            .iter()
+            .find(|row| row.pid == pid)
+            .cloned()
+        else {
+            if let Some(monitor) = self.data.process_monitor.as_mut() {
+                monitor.mark_missing();
+            }
+            return;
+        };
+
+        self.populate_process_monitor_details(pid);
+        let row = self
+            .data
+            .snapshot
+            .processes
+            .iter()
+            .find(|row| row.pid == pid)
+            .cloned()
+            .unwrap_or(row);
+
+        self.record_process_monitor_row(&row);
+    }
+
+    pub(super) fn record_process_monitor_row(&mut self, row: &ProcessRow) {
+        match self.data.process_monitor.as_mut() {
+            Some(monitor) if monitor.pid == row.pid => monitor.record(row),
+            _ => {
+                self.data.process_monitor = Some(super::state::ProcessMonitorState::new(
+                    row,
+                    super::HISTORY_CAPACITY,
+                ));
+            }
+        }
+    }
+
+    fn selected_process_row(&self) -> Option<&ProcessRow> {
+        self.selected_visible_index()?;
+        self.data.snapshot.processes.get(self.view.selected)
     }
 
     fn visible_pids(&self) -> Vec<i32> {
@@ -166,5 +262,53 @@ mod tests {
 
         let request = app.detail_request();
         assert!(!request.needs_any());
+    }
+
+    #[test]
+    fn process_monitor_replaces_prior_target() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.replace_processes_for_test(vec![sample_row(10), sample_row(20)]);
+        app.view.selected = 0;
+        app.start_process_monitor_for_selected();
+
+        app.view.selected = 1;
+        app.start_process_monitor_for_selected();
+
+        let monitor = app.process_monitor().unwrap();
+        assert_eq!(monitor.pid, 20);
+        assert_eq!(monitor.history.len(), 1);
+    }
+
+    #[test]
+    fn process_monitor_records_heavy_values_when_columns_hidden() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        let mut row = sample_row(10);
+        row.uss_bytes = Some(123);
+        row.pss_bytes = Some(456);
+        assert!(app.view.columns.toggle(ProcessColumn::Uss));
+        assert!(app.view.columns.toggle(ProcessColumn::Pss));
+
+        app.record_process_monitor_row(&row);
+
+        let monitor = app.process_monitor().unwrap();
+        assert_eq!(monitor.latest.uss_bytes, Some(123));
+        assert_eq!(monitor.latest.pss_bytes, Some(456));
+        assert_eq!(app.process_monitor_uss_points(), vec![(0.0, 123.0)]);
+        assert_eq!(app.process_monitor_pss_points(), vec![(0.0, 456.0)]);
+    }
+
+    #[test]
+    fn process_monitor_marks_missing_without_adding_zero_sample() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        let row = sample_row(10);
+        app.record_process_monitor_row(&row);
+        app.data.snapshot.processes.clear();
+
+        app.record_process_monitor_sample();
+
+        let monitor = app.process_monitor().unwrap();
+        assert!(monitor.missing);
+        assert_eq!(monitor.history.len(), 1);
+        assert_eq!(monitor.latest.rss_bytes, 10);
     }
 }

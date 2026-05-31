@@ -34,6 +34,8 @@ enum AppCommand {
     ApplySelectedSort,
     TogglePause,
     CloseOverlay,
+    StartProcessMonitor,
+    CloseProcessMonitorOverlay,
     Noop,
 }
 
@@ -51,6 +53,7 @@ impl AppState {
             self.view.sort_picker_open,
             self.view.filter_modal.open,
             self.view.filter_modal.editing,
+            self.view.process_monitor_open,
         ))
     }
 
@@ -130,6 +133,14 @@ impl AppState {
             }
             AppCommand::CloseOverlay => {
                 self.close_overlay();
+                KeyAction::Continue
+            }
+            AppCommand::StartProcessMonitor => {
+                self.start_process_monitor_for_selected();
+                KeyAction::Continue
+            }
+            AppCommand::CloseProcessMonitorOverlay => {
+                self.close_process_monitor_overlay();
                 KeyAction::Continue
             }
             AppCommand::Noop => KeyAction::Continue,
@@ -352,6 +363,7 @@ impl AppState {
         self.view.sort_picker_open = false;
         self.view.filter_modal.open = false;
         self.view.filter_modal.editing = false;
+        self.view.process_monitor_open = false;
     }
 
     fn toggle_filter_modal(&mut self) {
@@ -550,8 +562,17 @@ fn key_command(
     sort_picker_open: bool,
     filter_modal_open: bool,
     filter_modal_editing: bool,
+    process_monitor_open: bool,
 ) -> AppCommand {
     let code = key.code;
+    if process_monitor_open {
+        return match code {
+            KeyCode::Char('q') => AppCommand::Quit,
+            KeyCode::Esc => AppCommand::CloseProcessMonitorOverlay,
+            _ => AppCommand::Noop,
+        };
+    }
+
     if filter_modal_open {
         if filter_modal_editing {
             return match code {
@@ -645,6 +666,7 @@ fn key_command(
         KeyCode::Char('s') => AppCommand::ToggleSortPicker,
         KeyCode::Char('f') => AppCommand::ToggleFilterModal,
         KeyCode::Char('p') => AppCommand::TogglePause,
+        KeyCode::Enter => AppCommand::StartProcessMonitor,
         _ => AppCommand::Noop,
     }
 }
@@ -712,11 +734,11 @@ mod tests {
     #[test]
     fn key_command_maps_page_navigation() {
         assert_eq!(
-            key_command(key(KeyCode::PageUp), 3, false, false, false, false),
+            key_command(key(KeyCode::PageUp), 3, false, false, false, false, false),
             AppCommand::MoveSelection(-3)
         );
         assert_eq!(
-            key_command(key(KeyCode::PageDown), 3, false, false, false, false),
+            key_command(key(KeyCode::PageDown), 3, false, false, false, false, false),
             AppCommand::MoveSelection(3)
         );
     }
@@ -724,27 +746,59 @@ mod tests {
     #[test]
     fn key_command_maps_pause_toggle() {
         assert_eq!(
-            key_command(key(KeyCode::Char('p')), 3, false, false, false, false),
+            key_command(
+                key(KeyCode::Char('p')),
+                3,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             AppCommand::TogglePause
+        );
+    }
+
+    #[test]
+    fn key_command_maps_enter_to_process_monitor_from_table() {
+        assert_eq!(
+            key_command(key(KeyCode::Enter), 3, false, false, false, false, false),
+            AppCommand::StartProcessMonitor
+        );
+    }
+
+    #[test]
+    fn key_command_uses_process_monitor_bindings_when_open() {
+        assert_eq!(
+            key_command(key(KeyCode::Esc), 3, false, false, false, false, true),
+            AppCommand::CloseProcessMonitorOverlay
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Char('q')), 3, false, false, false, false, true),
+            AppCommand::Quit
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Enter), 3, false, false, false, false, true),
+            AppCommand::Noop
         );
     }
 
     #[test]
     fn key_command_uses_column_picker_bindings_when_open() {
         assert_eq!(
-            key_command(key(KeyCode::Down), 3, true, false, false, false),
+            key_command(key(KeyCode::Down), 3, true, false, false, false, false),
             AppCommand::MoveColumnPicker(1)
         );
         assert_eq!(
-            key_command(key(KeyCode::Enter), 3, true, false, false, false),
+            key_command(key(KeyCode::Enter), 3, true, false, false, false, false),
             AppCommand::ToggleSelectedColumn
         );
         assert_eq!(
-            key_command(shifted(KeyCode::Up), 3, true, false, false, false),
+            key_command(shifted(KeyCode::Up), 3, true, false, false, false, false),
             AppCommand::ReorderSelectedColumn(-1)
         );
         assert_eq!(
-            key_command(key(KeyCode::Char('J')), 3, true, false, false, false),
+            key_command(key(KeyCode::Char('J')), 3, true, false, false, false, false),
             AppCommand::ReorderSelectedColumn(1)
         );
     }
@@ -752,15 +806,15 @@ mod tests {
     #[test]
     fn key_command_uses_sort_picker_bindings_when_open() {
         assert_eq!(
-            key_command(key(KeyCode::Down), 3, false, true, false, false),
+            key_command(key(KeyCode::Down), 3, false, true, false, false, false),
             AppCommand::MoveSortPicker(1)
         );
         assert_eq!(
-            key_command(key(KeyCode::Enter), 3, false, true, false, false),
+            key_command(key(KeyCode::Enter), 3, false, true, false, false, false),
             AppCommand::ApplySelectedSort
         );
         assert_eq!(
-            key_command(key(KeyCode::Esc), 3, false, true, false, false),
+            key_command(key(KeyCode::Esc), 3, false, true, false, false, false),
             AppCommand::CloseOverlay
         );
     }
@@ -768,23 +822,31 @@ mod tests {
     #[test]
     fn key_command_uses_filter_modal_bindings_when_open() {
         assert_eq!(
-            key_command(key(KeyCode::Char('a')), 3, false, false, true, true),
+            key_command(key(KeyCode::Char('a')), 3, false, false, true, true, false),
             AppCommand::FilterPushChar('a')
         );
         assert_eq!(
-            key_command(key(KeyCode::Backspace), 3, false, false, true, true),
+            key_command(key(KeyCode::Backspace), 3, false, false, true, true, false),
             AppCommand::FilterPopChar
         );
         assert_eq!(
-            key_command(controlled(KeyCode::Char('u')), 3, false, false, true, true),
+            key_command(
+                controlled(KeyCode::Char('u')),
+                3,
+                false,
+                false,
+                true,
+                true,
+                false
+            ),
             AppCommand::FilterClear
         );
         assert_eq!(
-            key_command(key(KeyCode::Enter), 3, false, false, true, true),
+            key_command(key(KeyCode::Enter), 3, false, false, true, true, false),
             AppCommand::ToggleFilterEditing
         );
         assert_eq!(
-            key_command(key(KeyCode::Char('p')), 3, false, false, true, true),
+            key_command(key(KeyCode::Char('p')), 3, false, false, true, true, false),
             AppCommand::FilterPushChar('p')
         );
     }
@@ -796,6 +858,33 @@ mod tests {
         app.handle_key(key(KeyCode::Char('f')));
 
         assert!(app.view.filter_modal.open);
+    }
+
+    #[test]
+    fn enter_opens_process_monitor_and_esc_closes_overlay_only() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.replace_processes_for_test(vec![sample_row(10)]);
+
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.view.process_monitor_open);
+        assert!(app.data.process_monitor.is_some());
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.view.process_monitor_open);
+        assert!(app.data.process_monitor.is_some());
+    }
+
+    #[test]
+    fn enter_closes_other_overlays_when_monitoring() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.replace_processes_for_test(vec![sample_row(10)]);
+        app.view.column_picker_open = true;
+        assert!(app.view.column_picker_open);
+
+        app.start_process_monitor_for_selected();
+
+        assert!(!app.view.column_picker_open);
+        assert!(app.view.process_monitor_open);
     }
 
     #[test]

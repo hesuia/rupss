@@ -25,7 +25,10 @@ use strum::{AsRefStr, IntoEnumIterator, IntoStaticStr};
 pub(crate) use tree::TreeRow;
 
 use self::owners::{OwnerNameCache, OwnerNameResolver};
-use self::state::{AppDataState, AppResources, AppViewState, ProcessTreeState};
+use self::state::{
+    AppDataState, AppResources, AppViewState, ProcessMonitorSample, ProcessMonitorState,
+    ProcessTreeState,
+};
 
 const HISTORY_CAPACITY: usize = 180;
 const TICK_RATE: Duration = Duration::from_secs(1);
@@ -116,6 +119,14 @@ impl AppState {
 
     pub(crate) fn is_filter_modal_open(&self) -> bool {
         self.view.filter_modal.open
+    }
+
+    pub(crate) fn is_process_monitor_open(&self) -> bool {
+        self.view.process_monitor_open
+    }
+
+    pub(crate) fn process_monitor(&self) -> Option<&ProcessMonitorState> {
+        self.data.process_monitor.as_ref()
     }
 
     pub(crate) fn filter_modal(&self) -> &self::state::FilterModalState {
@@ -226,6 +237,48 @@ impl AppState {
         view::history_points(&self.data.swap_history)
     }
 
+    pub(crate) fn process_monitor_rss_points(&self) -> Vec<(f64, f64)> {
+        self.process_monitor_points(|sample| Some(sample.rss_bytes as f64))
+    }
+
+    pub(crate) fn process_monitor_uss_points(&self) -> Vec<(f64, f64)> {
+        self.process_monitor_points(|sample| sample.uss_bytes.map(|value| value as f64))
+    }
+
+    pub(crate) fn process_monitor_pss_points(&self) -> Vec<(f64, f64)> {
+        self.process_monitor_points(|sample| sample.pss_bytes.map(|value| value as f64))
+    }
+
+    pub(crate) fn process_monitor_swap_points(&self) -> Vec<(f64, f64)> {
+        self.process_monitor_points(|sample| Some(sample.swap_bytes as f64))
+    }
+
+    pub(crate) fn process_monitor_cpu_points(&self) -> Vec<(f64, f64)> {
+        self.process_monitor_points(|sample| Some(sample.cpu_percent as f64))
+    }
+
+    pub(crate) fn process_monitor_threads_points(&self) -> Vec<(f64, f64)> {
+        self.process_monitor_points(|sample| Some(sample.threads as f64))
+    }
+
+    fn process_monitor_points(
+        &self,
+        value: impl Fn(&ProcessMonitorSample) -> Option<f64>,
+    ) -> Vec<(f64, f64)> {
+        self.data
+            .process_monitor
+            .as_ref()
+            .map(|monitor| {
+                monitor
+                    .history
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, sample)| value(sample).map(|value| (index as f64, value)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn detail_request(&self) -> VisibleDetailRequest {
         self.view.columns.detail_request()
     }
@@ -276,6 +329,14 @@ impl AppState {
         }
 
         false
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_processes_for_test(&mut self, processes: Vec<ProcessRow>) {
+        self.data.snapshot.processes = processes;
+        self.rebuild_filtered_indexes();
+        self.rebuild_tree_rows();
+        self.restore_selection(None, false);
     }
 }
 

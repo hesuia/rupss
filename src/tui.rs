@@ -49,6 +49,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut AppState) {
     if app.is_filter_modal_open() {
         render_filter_modal(frame, app);
     }
+    if app.is_process_monitor_open() {
+        render_process_monitor(frame, app);
+    }
 }
 
 fn render_history_chart(frame: &mut Frame<'_>, area: Rect, app: &AppState, rss: bool) {
@@ -232,7 +235,7 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         "p:pause"
     };
     let title = format!(
-        "Processes  q:quit  {pause_hint}  f:filter{filter_hint}  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page"
+        "Processes  q:quit  {pause_hint}  Enter:monitor  f:filter{filter_hint}  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page"
     );
 
     let table = Table::new(
@@ -394,6 +397,173 @@ fn process_table_cell(
     }
 }
 
+fn render_process_monitor(frame: &mut Frame<'_>, app: &AppState) {
+    let Some(monitor) = app.process_monitor() else {
+        return;
+    };
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(6)])
+        .split(area);
+
+    let status = if monitor.missing {
+        "missing"
+    } else {
+        "running"
+    };
+    let latest = &monitor.latest;
+    let summary = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("PID {} ", monitor.pid),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("{}  {}", monitor.name, monitor.command)),
+        ]),
+        Line::from(format!(
+            "status {status} / samples {} / RSS {} / USS {} / PSS {} / SWAP {} / CPU {} / THREADS {} / Esc:close / q:quit",
+            monitor.history.len(),
+            format_bytes(latest.rss_bytes),
+            format_option_bytes(latest.uss_bytes),
+            format_option_bytes(latest.pss_bytes),
+            format_bytes(latest.swap_bytes),
+            format_percent(latest.cpu_percent),
+            latest.threads,
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(summary).block(
+            Block::default()
+                .title("Process Monitor")
+                .borders(Borders::ALL),
+        ),
+        vertical[0],
+    );
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+        ])
+        .split(vertical[1]);
+    let areas = rows
+        .iter()
+        .flat_map(|row| {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(*row)
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+
+    render_monitor_chart(
+        frame,
+        areas[0],
+        "RSS",
+        app.process_monitor_rss_points(),
+        format_bytes(latest.rss_bytes),
+        Color::LightGreen,
+        format_bytes,
+    );
+    render_monitor_chart(
+        frame,
+        areas[1],
+        "USS",
+        app.process_monitor_uss_points(),
+        format_option_bytes(latest.uss_bytes).to_string(),
+        Color::Green,
+        format_bytes,
+    );
+    render_monitor_chart(
+        frame,
+        areas[2],
+        "PSS",
+        app.process_monitor_pss_points(),
+        format_option_bytes(latest.pss_bytes).to_string(),
+        Color::Cyan,
+        format_bytes,
+    );
+    render_monitor_chart(
+        frame,
+        areas[3],
+        "SWAP",
+        app.process_monitor_swap_points(),
+        format_bytes(latest.swap_bytes),
+        Color::LightBlue,
+        format_bytes,
+    );
+    render_monitor_chart(
+        frame,
+        areas[4],
+        "CPU",
+        app.process_monitor_cpu_points(),
+        format_percent(latest.cpu_percent),
+        Color::LightRed,
+        |value| format_percent(value as f32),
+    );
+    render_monitor_chart(
+        frame,
+        areas[5],
+        "THREADS",
+        app.process_monitor_threads_points(),
+        latest.threads.to_string(),
+        Color::Magenta,
+        |value| value.to_string(),
+    );
+}
+
+fn render_monitor_chart(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    points: Vec<(f64, f64)>,
+    latest: String,
+    color: Color,
+    format_axis: impl Fn(u64) -> String,
+) {
+    let x_max = points.last().map(|(x, _)| *x).unwrap_or(180.0).max(1.0);
+    let y_max = points
+        .iter()
+        .map(|(_, y)| *y)
+        .fold(1.0_f64, f64::max)
+        .ceil();
+    let y_label = format_axis(y_max as u64);
+    let datasets = vec![
+        Dataset::default()
+            .name(title)
+            .marker(symbols::Marker::Braille)
+            .style(Style::default().fg(color))
+            .graph_type(ratatui::widgets::GraphType::Line)
+            .data(&points),
+    ];
+    let chart = Chart::new(datasets)
+        .block(
+            Block::default()
+                .title(format!("{title}  {latest}"))
+                .borders(Borders::ALL),
+        )
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, x_max])
+                .labels([Line::from("-3m"), Line::from("now")]),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, y_max])
+                .labels([Line::from("0"), Line::from(y_label)]),
+        );
+
+    frame.render_widget(chart, area);
+}
+
 fn render_column_picker(frame: &mut Frame<'_>, app: &AppState) {
     let area = centered_rect(frame.area(), 36, 15);
     frame.render_widget(Clear, area);
@@ -492,7 +662,7 @@ mod tests {
     use super::{
         COLUMN_PICKER_BACKGROUND, centered_rect, chart_y_upper_bound, format_tree_name, render,
     };
-    use crate::{app::TreeRow, collector::ProcfsCollector};
+    use crate::{app::TreeRow, collector::ProcfsCollector, snapshot::ProcessRow};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
 
@@ -506,6 +676,22 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>()
+    }
+
+    fn sample_row(pid: i32) -> ProcessRow {
+        ProcessRow {
+            pid,
+            ppid: 1,
+            owner_uid: 0,
+            threads: 4,
+            name: "name".to_string(),
+            command: "cmd".to_string(),
+            rss_bytes: 1024,
+            uss_bytes: Some(512),
+            pss_bytes: Some(768),
+            swap_bytes: 256,
+            cpu_percent: 12.5,
+        }
     }
 
     #[test]
@@ -594,5 +780,26 @@ mod tests {
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("status paused"));
         assert!(text.contains("p:resume"));
+    }
+
+    #[test]
+    fn process_monitor_overlay_renders_summary_and_chart_titles() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = crate::app::AppState::new(ProcfsCollector::new());
+        app.replace_processes_for_test(vec![sample_row(42)]);
+        app.handle_key(key(KeyCode::Enter));
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Process Monitor"));
+        assert!(text.contains("PID 42"));
+        assert!(text.contains("RSS"));
+        assert!(text.contains("USS"));
+        assert!(text.contains("PSS"));
+        assert!(text.contains("SWAP"));
+        assert!(text.contains("CPU"));
+        assert!(text.contains("THREADS"));
     }
 }

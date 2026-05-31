@@ -6,7 +6,7 @@ use crate::{
     collector::{CpuSample, ProcfsCollector},
     error::CollectorError,
     history::HistoryBuffer,
-    snapshot::{Snapshot, SortDirection, SortKey, SortState, SystemSummary},
+    snapshot::{ProcessRow, Snapshot, SortDirection, SortKey, SortState, SystemSummary},
 };
 use ratatui::layout::Rect;
 use std::{
@@ -19,6 +19,7 @@ pub(super) struct AppDataState {
     pub(super) snapshot: Snapshot,
     pub(super) rss_history: HistoryBuffer<u64>,
     pub(super) swap_history: HistoryBuffer<u64>,
+    pub(super) process_monitor: Option<ProcessMonitorState>,
     pub(super) previous_cpu: HashMap<i32, CpuSample>,
     pub(super) last_error: Option<CollectorError>,
 }
@@ -29,9 +30,73 @@ impl AppDataState {
             snapshot: empty_snapshot(),
             rss_history: HistoryBuffer::new(HISTORY_CAPACITY),
             swap_history: HistoryBuffer::new(HISTORY_CAPACITY),
+            process_monitor: None,
             previous_cpu: HashMap::new(),
             last_error: None,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProcessMonitorSample {
+    pub(crate) rss_bytes: u64,
+    pub(crate) uss_bytes: Option<u64>,
+    pub(crate) pss_bytes: Option<u64>,
+    pub(crate) swap_bytes: u64,
+    pub(crate) cpu_percent: f32,
+    pub(crate) threads: u64,
+}
+
+impl From<&ProcessRow> for ProcessMonitorSample {
+    fn from(row: &ProcessRow) -> Self {
+        Self {
+            rss_bytes: row.rss_bytes,
+            uss_bytes: row.uss_bytes,
+            pss_bytes: row.pss_bytes,
+            swap_bytes: row.swap_bytes,
+            cpu_percent: row.cpu_percent,
+            threads: row.threads,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProcessMonitorState {
+    pub(crate) pid: i32,
+    pub(crate) name: String,
+    pub(crate) command: String,
+    pub(crate) latest: ProcessMonitorSample,
+    pub(crate) history: HistoryBuffer<ProcessMonitorSample>,
+    pub(crate) missing: bool,
+}
+
+impl ProcessMonitorState {
+    pub(crate) fn new(row: &ProcessRow, capacity: usize) -> Self {
+        let latest = ProcessMonitorSample::from(row);
+        let mut history = HistoryBuffer::new(capacity);
+        history.push(latest.clone());
+
+        Self {
+            pid: row.pid,
+            name: row.name.clone(),
+            command: row.command.clone(),
+            latest,
+            history,
+            missing: false,
+        }
+    }
+
+    pub(crate) fn record(&mut self, row: &ProcessRow) {
+        let sample = ProcessMonitorSample::from(row);
+        self.name.clone_from(&row.name);
+        self.command.clone_from(&row.command);
+        self.latest = sample.clone();
+        self.history.push(sample);
+        self.missing = false;
+    }
+
+    pub(crate) fn mark_missing(&mut self) {
+        self.missing = true;
     }
 }
 
@@ -145,6 +210,7 @@ pub(super) struct AppViewState {
     pub(super) column_picker_index: usize,
     pub(super) sort_picker_open: bool,
     pub(super) sort_picker_index: usize,
+    pub(super) process_monitor_open: bool,
     pub(super) paused: bool,
     pub(super) filter: ProcessFilter,
     pub(super) filter_modal: FilterModalState,
@@ -165,6 +231,7 @@ impl AppViewState {
             column_picker_index: 0,
             sort_picker_open: false,
             sort_picker_index: 0,
+            process_monitor_open: false,
             paused: false,
             filter: ProcessFilter::default(),
             filter_modal: FilterModalState::default(),
