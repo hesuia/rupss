@@ -1,33 +1,31 @@
 # rupss
 
 `rupss` is a lightweight Rust TUI for monitoring Linux system and per-process
-memory usage. It reads from `/proc` and renders a live terminal UI with:
+performance. It reads live data from `/proc` and renders a compact terminal UI
+focused on memory, CPU, and process inspection.
 
-- Specializes in displaying RSS, USS, PSS, and Swap usage for processes, along with CPU% and other metadata.
-- RSS and USS are 
-- USS/PSS/swap details from `smaps_rollup` (loaded only for visible rows)
-- Flat view and an expandable process tree view
+## Features
+
+- Flat list and expandable process tree views
+- Sorting by PID, PPID, owner, name, command, RSS, swap, and CPU%
+- Column picker with persistent in-session layout changes
+- Filter modal for PID, PPID, name, command, RSS, swap, CPU, USS, and PSS
+- Process monitor overlay for a single process with history charts
+- USS/PSS data loaded only for visible rows to keep the UI responsive
 
 ## Requirements
 
-- Linux (uses `/proc` and `smaps_rollup`)
+- Linux
 - A Rust toolchain that supports the 2024 edition
 
-## Install / Build
-
-Clone the repo and build:
+## Build and Run
 
 ```sh
 cargo build --release
-```
-
-Run:
-
-```sh
 ./target/release/rupss
 ```
 
-Or run directly with Cargo:
+Or run it directly in debug mode:
 
 ```sh
 cargo run
@@ -35,38 +33,46 @@ cargo run
 
 ## Controls
 
-- Quit: `q`
-- Move selection: `Up/Down` or `j/k`
-- Page: `PgUp/PgDn`
-- Jump: `Home/End`
-- Toggle flat/tree view: `t`
-- Tree expand/collapse: `Left/Right`
-- Mouse: click a row to select; in tree mode, click the name column to toggle
-- Sorting (press the same key again to toggle asc/desc):
-  - `i`: PID
-  - `p`: PPID
-  - `o`: owner
-  - `n`: name
-  - `m`: command
-  - `r`: RSS
-  - `s`: swap
-  - `c`: CPU%
+- `q`: quit
+- `j`/`k` or arrow keys: move selection
+- `PgUp`/`PgDn`: page up and down
+- `Home`/`End`: jump to the top or bottom
+- `t`: toggle flat/tree view
+- `Left`/`Right`: collapse or expand in tree view
+- `v`: open the column picker
+- `s`: open the sort picker
+- `f`: open the filter modal
+- `p`: pause and resume refresh
+- `Enter`: open the process monitor for the selected row
+- Mouse: click a row to select it; in tree view, click the name column to expand or collapse
+
+### Sort Picker
+
+- `j`/`k` or arrow keys: move the selection
+- `Enter` or `Space`: apply the selected sort key
+- `v`: jump to the column picker
+- `s`: close the sort picker
+
+### Filter Modal
+
+- `j`/`k` or arrow keys: move between filter rows
+- `Enter`: toggle edit mode for the selected row
+- While editing, type to update the active field
+- `h`/`l`: cycle metric operators
+- `Backspace`: delete the last character
+- `Ctrl+U`: clear the active field
+- `Esc`: close the modal
 
 ## Notes
 
-- USS/PSS and detailed swap come from `/proc/<pid>/smaps_rollup`. When access is
-  denied (common for processes you do not own), the UI shows a dim placeholder.
-- CPU% is computed from tick deltas between consecutive samples and is per
-  process (not normalized by CPU count).
-
-## Possible Next Features
-
-- Persist UI preferences such as visible columns, column order, sort state, and view mode between runs.
-- Add process search and filtering by PID, name, owner, or command substring.
-- Add a pause/resume refresh toggle and configurable refresh interval.
-- Add process actions such as sending signals or changing priority, with confirmation prompts.
-- Add an in-app help overlay for shortcuts and navigation.
+- USS, PSS, and detailed swap information come from `/proc/<pid>/smaps_rollup`.
+  Access can be denied for processes you do not own, so the UI falls back to a
+  dim placeholder.
+- CPU% is computed from tick deltas between consecutive samples and is not
+  normalized by CPU count.
+- The process monitor overlay keeps its own rolling history and is updated while
+  the selected process is still visible.
 
 ## License
 
-MIT (see `LICENSE`).
+MIT, see [LICENSE](LICENSE).
