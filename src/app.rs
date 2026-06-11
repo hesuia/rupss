@@ -1,4 +1,5 @@
 mod columns;
+mod config;
 mod filter;
 mod input;
 mod navigation;
@@ -29,6 +30,7 @@ use self::state::{
     AppDataState, AppResources, AppViewState, ProcessMonitorSample, ProcessMonitorState,
     ProcessTreeState,
 };
+use config::{AppConfigV1, ConfigStore};
 
 const HISTORY_CAPACITY: usize = 180;
 const TICK_RATE: Duration = Duration::from_secs(1);
@@ -81,7 +83,28 @@ impl AppState {
             data: AppDataState::new(),
             view: AppViewState::new(),
             tree: ProcessTreeState::new(),
-            resources: AppResources::new(collector, OwnerNameCache::new()),
+            resources: AppResources::new(collector, OwnerNameCache::new(), None),
+        }
+    }
+
+    pub(super) fn with_config(
+        collector: ProcfsCollector,
+        config: AppConfigV1,
+        config_store: Option<ConfigStore>,
+    ) -> Self {
+        let mut app = Self {
+            data: AppDataState::new(),
+            view: AppViewState::new(),
+            tree: ProcessTreeState::new(),
+            resources: AppResources::new(collector, OwnerNameCache::new(), config_store),
+        };
+        config.apply_to_app(&mut app);
+        app
+    }
+
+    pub(super) fn save_config(&self) {
+        if let Some(store) = &self.resources.config_store {
+            let _ = store.save(&AppConfigV1::from_app(self));
         }
     }
 

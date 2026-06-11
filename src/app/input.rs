@@ -253,6 +253,7 @@ impl AppState {
         self.rebuild_tree_rows();
         self.restore_selection(selected_pid, true);
         self.populate_visible_details();
+        self.save_config();
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -333,6 +334,7 @@ impl AppState {
         }
         self.ensure_visible();
         self.populate_visible_details();
+        self.save_config();
     }
 
     fn toggle_column_picker(&mut self) {
@@ -455,6 +457,7 @@ impl AppState {
         self.rebuild_tree_rows();
         self.restore_selection(selected_pid, true);
         self.populate_visible_details();
+        self.save_config();
     }
 
     fn filter_selected_row(&self) -> FilterRow {
@@ -518,6 +521,7 @@ impl AppState {
         if self.view.columns.toggle(column) {
             self.ensure_sort_key_visible();
             self.populate_visible_details();
+            self.save_config();
         }
     }
 
@@ -532,6 +536,7 @@ impl AppState {
             .move_in_order(self.view.column_picker_index, delta)
         {
             self.view.column_picker_index = next_index;
+            self.save_config();
         }
     }
 

@@ -1,4 +1,5 @@
-use super::{AppState, CrosstermTerminal, EVENT_POLL, KeyAction, TICK_RATE};
+use super::{AppState, CrosstermTerminal, EVENT_POLL, KeyAction, TICK_RATE, config::ConfigStore};
+use crate::collector::ProcfsCollector;
 use crate::{error::AppError, tui};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
@@ -21,7 +22,12 @@ pub fn run() -> Result<(), AppError> {
 }
 
 fn run_app(terminal: &mut CrosstermTerminal) -> Result<(), AppError> {
-    let mut app = AppState::default();
+    let config_store = ConfigStore::xdg();
+    let config = config_store
+        .as_ref()
+        .map(ConfigStore::load)
+        .unwrap_or_default();
+    let mut app = AppState::with_config(ProcfsCollector::new(), config, config_store);
     app.refresh();
 
     let mut last_tick = Instant::now();

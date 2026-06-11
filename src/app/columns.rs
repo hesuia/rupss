@@ -1,4 +1,5 @@
 use crate::{app::ViewMode, collector::VisibleDetailRequest};
+use serde::{Deserialize, Serialize};
 use strum::{EnumCount, EnumIter, EnumString, IntoEnumIterator, IntoStaticStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumCount, EnumIter, EnumString, IntoStaticStr)]
@@ -108,21 +109,32 @@ impl ProcessColumn {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ColumnConfigV1 {
+    #[serde(default = "column_config_version")]
     pub(crate) version: u8,
+    #[serde(default = "default_column_order")]
     pub(crate) order: Vec<String>,
+    #[serde(default)]
     pub(crate) hidden: Vec<String>,
 }
 
 impl Default for ColumnConfigV1 {
     fn default() -> Self {
         Self {
-            version: 1,
-            order: ProcessColumn::iter().map(|c| c.id().to_string()).collect(),
+            version: column_config_version(),
+            order: default_column_order(),
             hidden: Vec::new(),
         }
     }
+}
+
+fn column_config_version() -> u8 {
+    1
+}
+
+fn default_column_order() -> Vec<String> {
+    ProcessColumn::iter().map(|c| c.id().to_string()).collect()
 }
 
 #[derive(Debug, Clone)]

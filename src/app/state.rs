@@ -1,6 +1,6 @@
 use super::{
-    HISTORY_CAPACITY, TreeRow, ViewMode, columns::ColumnLayout, filter::MetricFilterOperator,
-    filter::ProcessFilter, owners::OwnerNameCache,
+    HISTORY_CAPACITY, TreeRow, ViewMode, columns::ColumnLayout, config::ConfigStore,
+    filter::MetricFilterOperator, filter::ProcessFilter, owners::OwnerNameCache,
 };
 use crate::{
     collector::{CpuSample, ProcfsCollector},
@@ -254,13 +254,19 @@ impl ProcessTreeState {
 pub(super) struct AppResources {
     pub(super) owner_resolver: OwnerNameCache,
     pub(super) collector: ProcfsCollector,
+    pub(super) config_store: Option<ConfigStore>,
 }
 
 impl AppResources {
-    pub(super) fn new(collector: ProcfsCollector, owner_resolver: OwnerNameCache) -> Self {
+    pub(super) fn new(
+        collector: ProcfsCollector,
+        owner_resolver: OwnerNameCache,
+        config_store: Option<ConfigStore>,
+    ) -> Self {
         Self {
             owner_resolver,
             collector,
+            config_store,
         }
     }
 }
