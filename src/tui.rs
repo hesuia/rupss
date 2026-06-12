@@ -236,7 +236,7 @@ fn render_process_table(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         "p:pause"
     };
     let title = format!(
-        "Processes  q:quit  {pause_hint}  Enter:monitor  f:filter{filter_hint}  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page"
+        "Processes  q:quit  {pause_hint}  R:reset  Enter:monitor  f:filter{filter_hint}  t:tree  v:columns  s:sort  arrows/jk:move  Left/Right:collapse/expand  click:select/toggle  PgUp/PgDn:page"
     );
 
     let table = Table::new(
@@ -295,7 +295,7 @@ fn render_filter_modal(frame: &mut Frame<'_>, app: &AppState) {
     });
 
     let mut title = format!(
-        "Filter ({})  j/k:move  Enter:edit  h/l:op  Esc:close",
+        "Filter ({})  j/k:move  Enter:edit  h/l:op  R:reset  Esc:close",
         if modal.editing { "edit" } else { "nav" }
     );
     if let Some(err) = modal.error.as_deref() {
@@ -358,7 +358,7 @@ fn render_sort_picker(frame: &mut Frame<'_>, app: &AppState) {
     let table = Table::new(rows, [Constraint::Min(28)])
         .block(
             Block::default()
-                .title("Sort  j/k:select  Enter/Space:apply  Esc/s:close")
+                .title("Sort  j/k:select  Enter/Space:apply  R:reset  Esc/s:close")
                 .borders(Borders::ALL)
                 .style(Style::default().bg(COLUMN_PICKER_BACKGROUND))
                 .border_style(Style::default().fg(COLUMN_PICKER_BORDER))
@@ -595,7 +595,7 @@ fn render_column_picker(frame: &mut Frame<'_>, app: &AppState) {
     let table = Table::new(rows, [Constraint::Min(28)])
         .block(
             Block::default()
-                .title("Columns  j/k:select  Shift+Up/Down or J/K:move  Enter/Space:toggle  Esc/v:close")
+                .title("Columns  j/k:select  Shift+Up/Down or J/K:move  Enter/Space:toggle  R:reset  Esc/v:close")
                 .borders(Borders::ALL)
                 .style(Style::default().bg(COLUMN_PICKER_BACKGROUND))
                 .border_style(Style::default().fg(COLUMN_PICKER_BORDER))

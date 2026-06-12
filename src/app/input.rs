@@ -33,6 +33,7 @@ enum AppCommand {
     ToggleSelectedColumn,
     ApplySelectedSort,
     TogglePause,
+    ResetViewPreferences,
     CloseOverlay,
     StartProcessMonitor,
     CloseProcessMonitorOverlay,
@@ -129,6 +130,10 @@ impl AppState {
             AppCommand::ApplySelectedSort => self.apply_selected_sort_and_continue(),
             AppCommand::TogglePause => {
                 self.toggle_pause();
+                KeyAction::Continue
+            }
+            AppCommand::ResetViewPreferences => {
+                self.reset_view_preferences();
                 KeyAction::Continue
             }
             AppCommand::CloseOverlay => {
@@ -460,6 +465,26 @@ impl AppState {
         self.save_config();
     }
 
+    fn reset_view_preferences(&mut self) {
+        let selected_pid = self.selected_pid();
+        self.view.columns = Default::default();
+        self.view.sort_state = SortState::new(SortKey::Rss, SortDirection::Descending);
+        self.view.view_mode = ViewMode::Flat;
+        self.view.filter = Default::default();
+        self.view.filter_modal = Default::default();
+        self.view.column_picker_open = false;
+        self.view.column_picker_index = 0;
+        self.view.sort_picker_open = false;
+        self.view.sort_picker_index = sort_key_index(self.view.sort_state.key);
+
+        self.sort_current_processes();
+        self.rebuild_filtered_indexes();
+        self.rebuild_tree_rows();
+        self.restore_selection(selected_pid, true);
+        self.populate_visible_details();
+        self.save_config();
+    }
+
     fn filter_selected_row(&self) -> FilterRow {
         FilterRow::from_index(self.view.filter_modal.selected).unwrap_or(FilterRow::Pid)
     }
@@ -600,6 +625,7 @@ fn key_command(
             KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => AppCommand::Quit,
             KeyCode::Esc => AppCommand::CloseOverlay,
             KeyCode::Enter => AppCommand::ToggleFilterEditing,
+            KeyCode::Char('R') => AppCommand::ResetViewPreferences,
             KeyCode::Up | KeyCode::Char('k') => AppCommand::MoveFilterSelection(-1),
             KeyCode::Down | KeyCode::Char('j') => AppCommand::MoveFilterSelection(1),
             KeyCode::Left | KeyCode::Char('h') => AppCommand::CycleFilterOperator(-1),
@@ -621,6 +647,7 @@ fn key_command(
         return match code {
             KeyCode::Char('q') => AppCommand::Quit,
             KeyCode::Esc => AppCommand::CloseOverlay,
+            KeyCode::Char('R') => AppCommand::ResetViewPreferences,
             KeyCode::Char('v') => AppCommand::ToggleColumnPicker,
             KeyCode::Char('s') => AppCommand::ToggleSortPicker,
             KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -642,6 +669,7 @@ fn key_command(
         return match code {
             KeyCode::Char('q') => AppCommand::Quit,
             KeyCode::Esc => AppCommand::CloseOverlay,
+            KeyCode::Char('R') => AppCommand::ResetViewPreferences,
             KeyCode::Char('v') => AppCommand::ToggleColumnPicker,
             KeyCode::Char('s') => AppCommand::ToggleSortPicker,
             KeyCode::Up | KeyCode::Char('k') => AppCommand::MoveSortPicker(-1),
@@ -668,6 +696,7 @@ fn key_command(
         KeyCode::Char('s') => AppCommand::ToggleSortPicker,
         KeyCode::Char('f') => AppCommand::ToggleFilterModal,
         KeyCode::Char('p') => AppCommand::TogglePause,
+        KeyCode::Char('R') => AppCommand::ResetViewPreferences,
         KeyCode::Enter => AppCommand::StartProcessMonitor,
         _ => AppCommand::Noop,
     }
@@ -690,10 +719,10 @@ fn sort_key_index(sort_key: SortKey) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppCommand, AppState, KeyAction, key_command};
+    use super::{AppCommand, AppState, KeyAction, key_command, sort_key_index};
     use crate::app::filter::ProcessFilter;
     use crate::snapshot::{ProcessRow, SortDirection, SortKey, SortState};
-    use crate::{app::ProcessColumn, collector::ProcfsCollector};
+    use crate::{app::ProcessColumn, app::ViewMode, collector::ProcfsCollector};
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -758,6 +787,42 @@ mod tests {
                 false
             ),
             AppCommand::TogglePause
+        );
+    }
+
+    #[test]
+    fn key_command_maps_shift_r_to_reset_preferences() {
+        assert_eq!(
+            key_command(
+                key(KeyCode::Char('R')),
+                3,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
+            AppCommand::ResetViewPreferences
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Char('R')), 3, true, false, false, false, false),
+            AppCommand::ResetViewPreferences
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Char('R')), 3, false, true, false, false, false),
+            AppCommand::ResetViewPreferences
+        );
+        assert_eq!(
+            key_command(key(KeyCode::Char('R')), 3, false, false, true, false, false),
+            AppCommand::ResetViewPreferences
+        );
+    }
+
+    #[test]
+    fn key_command_keeps_shift_r_as_text_when_filter_is_editing() {
+        assert_eq!(
+            key_command(key(KeyCode::Char('R')), 3, false, false, true, true, false),
+            AppCommand::FilterPushChar('R')
         );
     }
 
@@ -1391,6 +1456,44 @@ mod tests {
         assert!(app.is_paused());
         app.handle_key(key(KeyCode::Char('p')));
         assert!(!app.is_paused());
+    }
+
+    #[test]
+    fn shift_r_resets_view_preferences() {
+        let mut app = AppState::new(ProcfsCollector::new());
+        app.data.snapshot.processes = vec![sample_row(30), sample_row(10), sample_row(20)];
+        app.view.columns.move_in_order(0, 1);
+        app.view.columns.toggle(ProcessColumn::Command);
+        app.view.sort_state = SortState::new(SortKey::Pid, SortDirection::Ascending);
+        app.view.view_mode = ViewMode::Tree;
+        app.view.filter = ProcessFilter::from_text_query("name");
+        app.view.filter_modal.name = "name".to_string();
+        app.view.column_picker_open = true;
+        app.view.column_picker_index = 4;
+        app.view.sort_picker_open = true;
+        app.view.sort_picker_index = 0;
+        app.view.selected = 2;
+        app.view.scroll_offset = 2;
+        app.rebuild_filtered_indexes();
+        app.rebuild_tree_rows();
+
+        app.handle_key(key(KeyCode::Char('R')));
+
+        assert_eq!(app.view.columns.ordered_columns()[0], ProcessColumn::Pid);
+        assert!(app.view.columns.is_visible(ProcessColumn::Command));
+        assert_eq!(
+            app.view.sort_state,
+            SortState::new(SortKey::Rss, SortDirection::Descending)
+        );
+        assert_eq!(app.view.view_mode, ViewMode::Flat);
+        assert!(!app.view.filter.is_active());
+        assert_eq!(app.view.filter_modal.name, "");
+        assert_eq!(app.view.filtered_indexes, vec![0, 1, 2]);
+        assert!(!app.view.column_picker_open);
+        assert!(!app.view.sort_picker_open);
+        assert_eq!(app.view.column_picker_index, 0);
+        assert_eq!(app.view.sort_picker_index, sort_key_index(SortKey::Rss));
+        assert!(app.view.scroll_offset <= 2);
     }
 
     #[test]
